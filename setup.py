@@ -7,7 +7,7 @@ from setuptools import Extension, setup
 this_directory = Path(__file__).parent
 long_description = (this_directory / "readme.md").read_text()
 
-version = '0.0.6'
+version = '0.0.7'
 
 ext = Extension(name="UltraDict", sources=["UltraDict.py"])
 
