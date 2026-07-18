@@ -36,6 +36,15 @@ future processes. To work around this issue you can currently set `full_dump_siz
 of the dict to set a static full dump memory of the requested size. This full dump memory will live as long as the creator lives.
 This approach has the downside that you need to plan ahead for your data size and if it does not fit into the full dump memory, it will break.
 
+## Security
+
+UltraDict uses `pickle` to serialize data by default. Unpickling attacker-controlled data leads to
+arbitrary code execution, and any local process that can guess or enumerate the shared memory names
+can write to the buffers. Only use UltraDict between processes that already trust each other and run
+under user accounts you control; do not use it as a boundary against untrusted local processes. If
+you need to share data with less trusted processes, pass a safe `serializer` (e.g. one based on JSON)
+instead of pickle.
+
 ## Alternatives
 
 There are many alternatives:
