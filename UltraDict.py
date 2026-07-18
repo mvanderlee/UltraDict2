@@ -21,7 +21,7 @@
 __all__ = ['UltraDict']
 
 import multiprocessing, multiprocessing.shared_memory, multiprocessing.synchronize
-import collections, os, pickle, sys, time, weakref
+import collections, os, pickle, sys, threading, time, weakref
 import importlib.util, importlib.machinery
 
 try:
@@ -67,8 +67,14 @@ def remove_shm_from_resource_tracker():
     if "shared_memory" in resource_tracker._CLEANUP_FUNCS:
         del resource_tracker._CLEANUP_FUNCS["shared_memory"]
 
-#More details at: https://bugs.python.org/issue38119
-remove_shm_from_resource_tracker()
+# Python 3.13+ supports track=False on SharedMemory, so the global (and invasive)
+# resource tracker monkey-patch is only needed on older versions.
+# More details at: https://bugs.python.org/issue38119
+if sys.version_info >= (3, 13):
+    shm_track_kwargs = {'track': False}
+else:
+    shm_track_kwargs = {}
+    remove_shm_from_resource_tracker()
 
 class UltraDict(collections.UserDict, dict):
 
@@ -91,17 +97,25 @@ class UltraDict(collections.UserDict, dict):
 
         __slots__ = 'parent', 'has_lock',  'ctx', 'lock_atomic', 'lock_remote', \
             'pid', 'pid_bytes', 'pid_remote', 'pid_remote_ctx', 'pid_remote_atomic', \
-            'next_acquire_parameters'
+            'next_acquire_parameters', 'lock_time_remote', 'thread_lock', 'owner_tid'
 
-        def __init__(self, parent, lock_name, pid_name):
+        def __init__(self, parent, lock_name, pid_name, time_name='lock_time_remote'):
             self.has_lock = 0
             self.next_acquire_parameters = ()
+
+            # Gate for threads of the same process sharing this instance; `has_lock`
+            # alone is not thread-safe (check-then-act race)
+            self.thread_lock = threading.RLock()
+            self.owner_tid = 0
 
             # `lock_name` contains the name of the attribute that the parent uses
             # to store the memory view on the remote lock, so `self.lock_remote` is
             # referring to a memory view
             self.lock_remote = getattr(parent, lock_name)
             self.pid_remote = getattr(parent, pid_name)
+            # Timestamp (ms since epoch) of when the lock was acquired, used to
+            # detect pid recycling when stealing from dead processes
+            self.lock_time_remote = getattr(parent, time_name)
 
             self.init_pid()
 
@@ -118,8 +132,10 @@ class UltraDict(collections.UserDict, dict):
                 if self.has_lock:
                     raise Exception("Release the SharedLock before you fork the process")
 
-                # After forking, we got a new pid
+                # After forking, we got a new pid and only the forking thread survives
                 self.init_pid()
+                self.thread_lock = threading.RLock()
+                self.owner_tid = 0
 
             if sys.platform != 'win32':
                 os.register_at_fork(after_in_child=after_fork)
@@ -140,13 +156,12 @@ class UltraDict(collections.UserDict, dict):
                         time_start = e.timestamp
                         blocking_pid = e.blocking_pid
 
-                    # We should not be the blocking pid
-                    assert blocking_pid != self.pid
-
                     time_passed = time.monotonic() - time_start
 
                     if time_passed >= timeout:
-                        if steal_after_timeout:
+                        # Cannot steal from our own process (another thread or another
+                        # instance of the same process holds the lock and is alive)
+                        if steal_after_timeout and blocking_pid != self.pid:
                             # If the blocking pid has changed meanwhile, someone else took or stole the lock
                             if blocking_pid == e.blocking_pid:
                                 self.steal_from_dead(from_pid=blocking_pid, release=True)
@@ -158,35 +173,44 @@ class UltraDict(collections.UserDict, dict):
 
         #@profile
         def acquire(self, block=True, sleep_time=0.000001, timeout=None, steal_after_timeout=False):
-            # If we already own the lock, just increment our counter
-            if self.has_lock:
-                self.has_lock += 1
-                return True
-
             if timeout:
                 return self.acquire_with_timeout(sleep_time=sleep_time, timeout=timeout, steal_after_timeout=steal_after_timeout)
 
-            while True:
-                # We need both, the shared lock to be False and the lock_pid to be 0
-                if self.test_and_inc():
+            # Serialize threads of our own process first
+            if not self.thread_lock.acquire(blocking=block):
+                raise Exceptions.CannotAcquireLock(blocking_pid=self.pid)
 
-                    assert self.has_lock == 0
-                    self.has_lock = 1
-
-                    # If nobody had owned the lock, so the remote pid should be zero
-                    assert self.pid_remote[0:4] == b'\x00\x00\x00\x00'
-
-                    self.pid_remote[:] = self.pid_bytes
+            try:
+                # If we already own the lock, just increment our counter
+                if self.has_lock:
+                    self.has_lock += 1
                     return True
 
-                # If set to 0, we practically have a busy wait
-                if sleep_time:
-                    # On Python < 3.10, this smallest possible time is actually rather big,
-                    #  maybe around 10 ms, depending on your CPU.
-                    time.sleep(sleep_time)
+                while True:
+                    # We need both, the shared lock to be False and the lock_pid to be 0
+                    if self.test_and_inc():
+                        # Claim ownership by writing our pid; cmpxchg because a stealer
+                        # may legitimately grab a phantom lock (lock set, pid still 0)
+                        result = self.pid_remote_atomic.cmpxchg_strong(expected=b'\x00\x00\x00\x00', desired=self.pid_bytes)
+                        if result.success:
+                            self.has_lock = 1
+                            self.owner_tid = threading.get_ident()
+                            self.lock_time_remote[:] = int(time.time() * 1000).to_bytes(8, 'little')
+                            return True
+                        # A stealer raced us between test_and_inc() and the pid write
+                        # and now owns the lock; retry like anyone else
 
-                if not block:
-                    raise Exceptions.CannotAcquireLock(blocking_pid=self.get_remote_pid())
+                    # If set to 0, we practically have a busy wait
+                    if sleep_time:
+                        # On Python < 3.10, this smallest possible time is actually rather big,
+                        #  maybe around 10 ms, depending on your CPU.
+                        time.sleep(sleep_time)
+
+                    if not block:
+                        raise Exceptions.CannotAcquireLock(blocking_pid=self.get_remote_pid())
+            except BaseException:
+                self.thread_lock.release()
+                raise
 
         #@profile
         def test_and_inc(self):
@@ -206,15 +230,17 @@ class UltraDict(collections.UserDict, dict):
         #@profile
         def release(self, *args):
             #log.debug("Release lock, lock={}", self.has_lock)
-            if self.has_lock > 0:
+            if self.has_lock > 0 and self.owner_tid == threading.get_ident():
                 owner = int.from_bytes(self.pid_remote, 'little')
                 if owner != self.pid:
                     raise Exception(f"Our lock for pid {self.pid} was stolen by pid {owner}")
                 self.has_lock -= 1
                 # Last local lock released, release shared lock
                 if not self.has_lock:
+                    self.owner_tid = 0
                     self.pid_remote[:] = b'\x00\x00\x00\x00'
                     self.test_and_dec()
+                self.thread_lock.release()
                 #log.debug("Relased lock, lock={} pid_remote={}", self.has_lock, int.from_bytes(self.pid_remote, 'little'))
                 return True
 
@@ -225,6 +251,7 @@ class UltraDict(collections.UserDict, dict):
             self.lock_remote[:] = b'\x00'
             self.pid_remote[:] = b'\x00\x00\x00\x00'
             self.has_lock = 0
+            self.owner_tid = 0
 
         def reset_acquire_parameters(self):
             self.next_acquire_parameters = ()
@@ -243,19 +270,35 @@ class UltraDict(collections.UserDict, dict):
             if from_pid != self.get_remote_pid():
                 return False
 
+            # Take the local thread gate first so release() stays balanced
+            if not self.thread_lock.acquire(blocking=False):
+                # Another thread of our own process is interacting with the lock
+                return False
+
             # Stealing the lock means actually just putting our pid into the shared memory overwriting the other pid.
             # This can go wrong if the lock owner is actually still alive and working.
             result = self.pid_remote_atomic.cmpxchg_strong(expected=from_pid.to_bytes(4, 'little'), desired=self.pid_bytes)
             if result.success:
                 self.has_lock = 1
+                self.owner_tid = threading.get_ident()
+                self.lock_time_remote[:] = int(time.time() * 1000).to_bytes(8, 'little')
                 if release:
                     self.release()
+            else:
+                self.thread_lock.release()
             return result.success
 
         def steal_from_dead(self, from_pid=0, release=False):
             """ Check if from_pid is actually a dead process and if yes, steal the lock from it.
                 Optionally, the lock can be directly released after stealing it.
             """
+
+            # Phantom lock: the owner died between setting the lock byte and writing its
+            # pid (or between clearing the pid and the lock byte on release). There is no
+            # process to check. Stealing is race-safe because both a live acquirer and we
+            # claim the pid via cmpxchg from zero, so only one of us can win.
+            if from_pid == 0:
+                return self.steal(from_pid=0, release=release)
 
             try:
                 import psutil
@@ -265,13 +308,15 @@ class UltraDict(collections.UserDict, dict):
             try:
                 p = psutil.Process(from_pid)
                 if p and p.is_running() and p.status() not in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
-                    raise Exception(f"Trying to steal lock from process that is still alive, something seems really wrong from_pid={from_pid} pid={self.pid} p={p}")
+                    # The pid may have been recycled: if the process started after the
+                    # lock was acquired, it cannot be the actual lock owner
+                    lock_time_ms = int.from_bytes(self.lock_time_remote, 'little')
+                    if not (lock_time_ms and p.create_time() * 1000 > lock_time_ms):
+                        raise Exception(f"Trying to steal lock from process that is still alive, something seems really wrong from_pid={from_pid} pid={self.pid} p={p}")
             except psutil.NoSuchProcess:
                 # If the process is already gone, we cannot find information about it.
                 # It will be safe to steal the lock.
                 pass
-            except Exception as e:
-                raise e
 
             return self.steal(from_pid=from_pid, release=release)
 
@@ -298,10 +343,11 @@ class UltraDict(collections.UserDict, dict):
             if hasattr(self, 'pid_remote_ctx'):
                 self.pid_remote_ctx.__exit__(None, None, None)
                 del self.pid_remote_ctx
-            if hasattr(self, 'pid_remote_aotmic'):
+            if hasattr(self, 'pid_remote_atomic'):
                 del self.pid_remote_atomic
             del self.lock_remote
             del self.pid_remote
+            del self.lock_time_remote
             del self.pid_bytes
             del self.pid
 
@@ -340,6 +386,7 @@ class UltraDict(collections.UserDict, dict):
         'shared_lock_remote', \
         'recurse', 'recurse_remote', 'recurse_register', \
         'full_dump_memory_name_remote', \
+        'lock_time_remote', \
         'data', 'closed', 'auto_unlink', \
         'finalizer'
 
@@ -353,10 +400,11 @@ class UltraDict(collections.UserDict, dict):
             if full_dump_size:
                 full_dump_size = -(full_dump_size // -4096) * 4096
 
-        assert buffer_size < 2**32
+        if buffer_size >= 2**32:
+            raise ValueError(f"buffer_size must be smaller than 2**32, got {buffer_size}")
 
-        if recurse:
-            assert serializer == pickle
+        if recurse and serializer != pickle:
+            raise ValueError("recurse=True requires the pickle serializer")
 
         self.data = {}
 
@@ -521,6 +569,7 @@ class UltraDict(collections.UserDict, dict):
         self.shared_lock_remote            = self.control.buf[18: 19]
         self.recurse_remote                = self.control.buf[19: 20]
         self.full_dump_memory_name_remote  = self.control.buf[20:275]
+        self.lock_time_remote              = self.control.buf[275:283]
 
     def del_remotes(self):
         """
@@ -544,31 +593,40 @@ class UltraDict(collections.UserDict, dict):
 
         If `create` is True, create the object if it does not exist.
         """
-        assert size > 0 or not create
-        if name:
-            # First try to attach to existing memory
-            try:
-                memory = multiprocessing.shared_memory.SharedMemory(name=name)
-                #log.debug('Attached shared memory: ', memory.name)
+        if create and size <= 0:
+            raise ValueError(f"Cannot create memory with size={size}")
 
-                if create:
-                    raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists")
+        while True:
+            if name:
+                # First try to attach to existing memory
+                try:
+                    memory = multiprocessing.shared_memory.SharedMemory(name=name, **shm_track_kwargs)
+                    #log.debug('Attached shared memory: ', memory.name)
+
+                    if create:
+                        memory.close()
+                        raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists")
+
+                    return memory
+                except FileNotFoundError:
+                    pass
+
+            # No existing memory found
+            if create or create is None:
+                try:
+                    memory = multiprocessing.shared_memory.SharedMemory(create=True, size=size, name=name, **shm_track_kwargs)
+                except FileExistsError:
+                    if create:
+                        raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists") from None
+                    # We lost the creation race against another process; attach instead
+                    continue
+                # Remember that we have created this memory
+                memory.created_by_ultra = True
+                #log.debug('Created shared memory: ', memory.name)
 
                 return memory
-            except FileNotFoundError:
-                pass
 
-        # No existing memory found
-        if create or create is None:
-            memory = multiprocessing.shared_memory.SharedMemory(create=True, size=size, name=name)
-            #multiprocessing.resource_tracker.unregister(memory._name, 'shared_memory')
-            # Remember that we have created this memory
-            memory.created_by_ultra = True
-            #log.debug('Created shared memory: ', memory.name)
-
-            return memory
-
-        raise Exceptions.CannotAttachSharedMemory(f"Could not get memory '{name}'")
+            raise Exceptions.CannotAttachSharedMemory(f"Could not get memory '{name}'")
 
     #@profile
     def dump(self):
@@ -653,7 +711,8 @@ class UltraDict(collections.UserDict, dict):
         try:
             name = bytes(self.full_dump_memory_name_remote).decode('utf-8').strip().strip('\x00')
             #log.debug("Full dump name={}", name)
-            assert len(name) >= 1
+            if len(name) < 1:
+                raise Exceptions.CorruptedStream("Full dump memory name is empty")
             return self.get_memory(create=False, name=name)
         except Exceptions.CannotAttachSharedMemory as e:
             if retry < max_retry:
@@ -688,22 +747,30 @@ class UltraDict(collections.UserDict, dict):
 
                 # Read header
                 # The first byte should be a FF byte to introduce the header
-                assert bytes(buf[pos:pos+1]) == b'\xFF'
+                if bytes(buf[pos:pos+1]) != b'\xFF':
+                    raise Exceptions.CorruptedStream("Full dump header start marker missing")
                 pos += 1
                 # Then comes 4 bytes of length
                 length = int.from_bytes(bytes(buf[pos:pos+4]), 'little')
-                assert length > 0, (self.status(), full_dump_memory, bytes(buf[:]).decode('utf-8').strip().strip('\x00'), len(buf))
+                if length <= 0:
+                    raise Exceptions.CorruptedStream(f"Full dump length invalid: {(self.status(), full_dump_memory, len(buf))}")
                 pos += 4
                 #log.debug("Found update, pos={} length={}", pos, length)
-                assert bytes(buf[pos:pos+1]) == b'\xFF'
+                if bytes(buf[pos:pos+1]) != b'\xFF':
+                    raise Exceptions.CorruptedStream("Full dump header end marker missing")
                 pos += 1
                 # Unserialize the update data, we expect a tuple of key and value
                 self.data = self.serializer.loads(bytes(buf[pos:pos+length]))
                 self.full_dump_counter = full_dump_counter
                 self.update_stream_position = 0
 
-                if sys.platform != 'win32' and not self.full_dump_memory:
-                    full_dump_memory.close()
+                if full_dump_memory is not self.full_dump_memory:
+                    if sys.platform == 'win32':
+                        # Cannot close on Windows or the memory is destroyed; keep only
+                        # the newest handle so the old one gets garbage collected
+                        self.full_dump_memory = full_dump_memory
+                    else:
+                        full_dump_memory.close()
             else:
                 raise Exception("Cannot load full dump, no new data available")
         except AssertionError as e:
@@ -768,14 +835,16 @@ class UltraDict(collections.UserDict, dict):
                 # Iterate over all updates until the start of the last update
                 while pos < int.from_bytes(self.update_stream_position_remote, 'little'):
                     # Read header
-                    # The first byte should be a FF byte to introduce the headerfull_dump_counter_remote
-                    assert bytes(self.buffer.buf[pos:pos+1]) == b'\xFF'
+                    # The first byte should be a FF byte to introduce the header
+                    if bytes(self.buffer.buf[pos:pos+1]) != b'\xFF':
+                        raise Exceptions.CorruptedStream(f"Stream header start marker missing at pos={pos}")
                     pos += 1
                     # Then comes 4 bytes of length
                     length = int.from_bytes(bytes(self.buffer.buf[pos:pos+4]), 'little')
                     pos += 4
                     #log.debug("Found update, update_stream_position={} length={}", self.update_stream_position, length + 6)
-                    assert bytes(self.buffer.buf[pos:pos+1]) == b'\xFF'
+                    if bytes(self.buffer.buf[pos:pos+1]) != b'\xFF':
+                        raise Exceptions.CorruptedStream(f"Stream header end marker missing at pos={pos}")
                     pos += 1
                     # Unserialize the update data, we expect a tuple of key and value
                     mode, key, value = self.serializer.loads(bytes(self.buffer.buf[pos:pos+length]))
@@ -787,6 +856,12 @@ class UltraDict(collections.UserDict, dict):
                     pos += length
                     # Remember that we have applied the update
                     self.update_stream_position = pos
+
+                # A dump() may have reset the stream while we were replaying it without
+                # a lock; frames we just applied could then be stale. Detect it via the
+                # dump counter (always incremented before the stream reset) and reload.
+                if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
+                    return self.apply_update()
             except (AssertionError, pickle.UnpicklingError) as e:
 
                 # It can happen that a slow process is not fast enough reading the stream and some
@@ -868,7 +943,11 @@ class UltraDict(collections.UserDict, dict):
         return key in self.data
 
     def __eq__(self, other):
-        return self.apply_update() == other.apply_update()
+        self.apply_update()
+        if isinstance(other, UltraDict):
+            other.apply_update()
+            other = other.data
+        return self.data == other
 
     def __contains__(self, key):
         self.apply_update()
@@ -976,6 +1055,7 @@ class UltraDict(collections.UserDict, dict):
         if hasattr(self, 'finalizer'):
             self.finalizer.detach()
 
+        full_dump_name = None
         if hasattr(self, 'full_dump_memory_name_remote'):
             full_dump_name = bytes(self.full_dump_memory_name_remote).decode('utf-8').strip().strip('\x00')
 
