@@ -25,8 +25,8 @@ import collections, os, pickle, sys, threading, time, weakref
 import importlib.util, importlib.machinery
 
 try:
-    # Needed for the shared locked
-    import atomics
+    # Needed for the shared lock
+    import atomics2 as atomics
 except ModuleNotFoundError:
     pass
 
@@ -505,7 +505,7 @@ class UltraDict(collections.UserDict, dict):
                 self.lock = self.SharedLock(self, 'lock_remote', 'lock_pid_remote')
             except NameError:
                 #self.cleanup()
-                raise Exceptions.MissingDependency("Install `atomics` Python package to use shared_lock=True") from None
+                raise Exceptions.MissingDependency("Install `atomics2` Python package to use shared_lock=True") from None
         else:
             self.lock = multiprocessing.RLock()
 

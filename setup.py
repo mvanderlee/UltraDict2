@@ -36,6 +36,6 @@ setup(
     zip_safe=False,
     ext_modules=Cython.Build.cythonize(ext, compiler_directives={'language_level' : "3"}),
     setup_requires=['cython>=0.24.1'],
-    install_requires=['atomics', 'psutil'],
+    install_requires=['atomics2==1.1.0', 'psutil'],
     python_requires=">=3.11",
 )
