@@ -8,8 +8,6 @@ from setuptools.command.build_py import build_py as _build_py
 this_directory = Path(__file__).parent
 long_description = (this_directory / "readme.md").read_text()
 
-version = '0.0.8'
-
 # The extension must live inside the package, otherwise the pure-python
 # package shadows the top-level compiled module and it is never imported
 ext = Extension(name="UltraDict.UltraDict", sources=["UltraDict.py"])
@@ -23,7 +21,6 @@ class build_py(_build_py):
 
 setup(
     name='UltraDict-wheels',
-    version=version,
     description='Sychronized, streaming dictionary that uses shared memory as a backend',
     long_description=long_description,
     long_description_content_type='text/markdown',

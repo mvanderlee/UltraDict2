@@ -1,6 +1,12 @@
 [build-system]
-requires        = ["setuptools", "wheel", "cython", "pylint", "psutil"]
+requires        = ["setuptools>=64", "setuptools-scm>=8", "wheel", "cython"]
 build-backend   = "setuptools.build_meta"
+
+# version comes from the git tag (e.g. tag v0.0.9 -> version 0.0.9);
+# untagged builds get a dev version derived from the last reachable tag
+[tool.setuptools_scm]
+# used when building without git metadata (e.g. GitHub source zip downloads)
+fallback_version = "0.0.0"
 
 [tool.pylint.'MESSAGES CONTROL']
 max-line-length = 140
