@@ -1,2 +1,2 @@
-atomics
+atomics2==1.1.0
 psutil

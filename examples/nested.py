@@ -4,8 +4,8 @@
 # Two dicts `ultra` and `other` are linked together using shared memory.
 # Using `recurse=True` will transparently convert child dicts into UltraDict instances.
 
-import sys
-sys.path.insert(0, '..')
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, '../..')
 
 from UltraDict import UltraDict

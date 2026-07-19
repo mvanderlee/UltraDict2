@@ -25,7 +25,7 @@ class CannotAttachSharedMemory(Exception):
 
 class CannotAcquireLock(Exception):
     def __init__(self, *args, blocking_pid=0, timestamp=None, **kwargs):
-        super().__init__('Cannot acquire lock', *args, *kwargs)
+        super().__init__('Cannot acquire lock', *args)
         self.blocking_pid = blocking_pid
         self.timestamp = timestamp or time.monotonic()
 
@@ -44,6 +44,14 @@ class AlreadyExists(Exception):
     pass
 
 class FullDumpMemoryFull(Exception):
+    pass
+
+class CorruptedStream(AssertionError):
+    """ Raised when the update stream or a full dump contains invalid data.
+
+        Subclasses AssertionError because the recovery paths catch AssertionError;
+        unlike a plain `assert`, it still fires when running under `python -O`.
+    """
     pass
 
 class MissingDependency(Exception):
