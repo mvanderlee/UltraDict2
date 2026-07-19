@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, '../..')
 
 import multiprocessing
-from UltraDict import UltraDict
+from UltraDict2 import UltraDict
 import random
 import string
 
