@@ -20,9 +20,16 @@
 
 __all__ = ['UltraDict']
 
-import multiprocessing, multiprocessing.shared_memory, multiprocessing.synchronize
-import collections, os, pickle, sys, threading, time, weakref
-import importlib.util, importlib.machinery
+import collections
+import multiprocessing
+import multiprocessing.shared_memory
+import multiprocessing.synchronize
+import os
+import pickle
+import sys
+import threading
+import time
+import weakref
 
 try:
     # Needed for the shared lock
@@ -30,25 +37,10 @@ try:
 except ModuleNotFoundError:
     pass
 
-try:
-    import ultraimport
-    Exceptions = ultraimport('__dir__/Exceptions.py')
-    try:
-        log = ultraimport('__dir__/utils/log.py', 'log', package=1)
-        log.log_targets = [ sys.stderr ]
-    except ultraimport.ResolveImportError:
-        import logging as log
-except ModuleNotFoundError:
-    try:
-        from . import Exceptions
-    except ImportError:
-        # Imported as a top-level module, e.g. straight from a repo checkout
-        import Exceptions
-    try:
-        from .utils import log
-        log.log_targets = [ sys.stderr ]
-    except ImportError:
-        import logging as log
+import logging as log
+
+from . import Exceptions
+
 
 def remove_shm_from_resource_tracker():
     """
