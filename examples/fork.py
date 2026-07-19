@@ -5,8 +5,8 @@
 # This is much faster than the spawn alterntive.
 #
 
-import sys
-sys.path.insert(0, '..')
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from UltraDict import UltraDict
 

@@ -1,8 +1,8 @@
 import unittest
 import subprocess
-import sys
+import os, sys
 
-sys.path.insert(0, '..')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict import UltraDict
 
 # Disable logging
