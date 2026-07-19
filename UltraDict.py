@@ -39,11 +39,15 @@ try:
     except ultraimport.ResolveImportError:
         import logging as log
 except ModuleNotFoundError:
-    from . import Exceptions
+    try:
+        from . import Exceptions
+    except ImportError:
+        # Imported as a top-level module, e.g. straight from a repo checkout
+        import Exceptions
     try:
         from .utils import log
         log.log_targets = [ sys.stderr ]
-    except ModuleNotFoundError:
+    except ImportError:
         import logging as log
 
 def remove_shm_from_resource_tracker():
