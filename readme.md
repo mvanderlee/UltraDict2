@@ -1,6 +1,10 @@
-# UltraDict
+# UltraDict2
 
 Sychronized, streaming Python dictionary that uses shared memory as a backend
+
+This is a maintained fork of [ronny-rentner/UltraDict](https://github.com/ronny-rentner/UltraDict),
+published on PyPI as [`UltraDict2`](https://pypi.org/project/UltraDict2/).
+Install with `pip install UltraDict2` and import with `from UltraDict2 import UltraDict`.
 
 **Warning: This is an early hack. There are only few unit tests and so on. Maybe not stable!**
 
@@ -9,14 +13,22 @@ Features:
 * No running manager processes
 * Works in spawn and fork context
 * Safe locking between independent processes
-* Tested with Python >= v3.8 on Linux, Windows and Mac
+* Tested with Python 3.11 - 3.14 on Linux, Windows and Mac
 * Convenient, no setter or getters necessary
 * Optional recursion for nested dicts
 
-[![PyPI Package](https://img.shields.io/pypi/v/ultradict.svg)](https://pypi.org/project/ultradict)
-[![Run Python Tests](https://github.com/ronny-rentner/UltraDict/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ronny-rentner/UltraDict/actions/workflows/ci.yml)
-[![Python >=3.8](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/github/license/ronny-rentner/UltraDict.svg)](https://github.com/ronny-rentner/UltraDict/blob/master/LICENSE.md)
+[![PyPI Package](https://img.shields.io/pypi/v/ultradict2.svg)](https://pypi.org/project/UltraDict2)
+[![Tests](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml)
+[![Python 3.11-3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/mvanderlee/UltraDict2.svg)](https://github.com/mvanderlee/UltraDict2/blob/main/LICENSE)
+
+## Atomic operations via atomics2
+
+Shared locking is built on [`atomics2`](https://github.com/mvanderlee/atomics2), a
+maintained fork of the abandoned [atomics](https://github.com/doodspav/atomics)
+package, rebuilt on patomic v1.1.0 with prebuilt wheels for Python 3.11 - 3.14
+across Linux, Windows, and macOS (including arm64). It is installed automatically
+as a dependency, so `shared_lock=True` works out of the box.
 
 ## General Concept
 
@@ -254,7 +266,7 @@ The module or object provided must support the methods *loads()* and *dumps()*
 
 `shared_lock`: When writing to the same dict at the same time from multiple, independent processes,
 they need a shared lock to synchronize and not overwrite each other's changes. Shared locks are slow.
-They rely on the [atomics](https://github.com/doodspav/atomics) package for atomic locks. By default,
+They rely on the [atomics2](https://github.com/mvanderlee/atomics2) package for atomic locks. By default,
 UltraDict will use a multiprocessing.RLock() instead which works well in fork context and is much faster.
 
 (Also see the section [Locking](#locking) below!)
@@ -304,7 +316,7 @@ Every UltraDict instance has a `lock` attribute which is either a [multiprocessi
 
 RLock is the fastest locking method that is used by default but you can only use it if you fork your child processes. Forking is the default on Linux systems.
 
-In contrast, on Windows systems, forking is not available and Python will automatically use the spawn method when creating child processes. You should then use the parameter `shared_lock=True` when using UltraDict. This requires that the external [atomics](https://github.com/doodspav/atomics) package is installed.
+In contrast, on Windows systems, forking is not available and Python will automatically use the spawn method when creating child processes. You should then use the parameter `shared_lock=True` when using UltraDict. This uses the [atomics2](https://github.com/mvanderlee/atomics2) package, which is installed automatically as a dependency.
 
 ### How to use the locking?
 ```python
