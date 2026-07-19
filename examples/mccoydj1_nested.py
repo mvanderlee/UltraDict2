@@ -9,7 +9,7 @@ import time
 import subprocess
 import sys
 
-from UltraDict import UltraDict
+from UltraDict2 import UltraDict
 
 name='ultra6'
 

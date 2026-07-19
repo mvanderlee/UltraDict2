@@ -18,4 +18,4 @@
 # limitations under the License.
 #
 
-from .UltraDict import UltraDict
+from .UltraDict2 import UltraDict

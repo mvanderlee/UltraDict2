@@ -107,9 +107,9 @@ jobs:
           CIBW_ARCHS: ${{ matrix.config.arch }}
           # import check hits the installed wheel (compiled extension); the
           # suite needs the project root cwd because tests exec examples/*.py
-          CIBW_TEST_COMMAND: python -c "import UltraDict" && cd {project} && python -m unittest
+          CIBW_TEST_COMMAND: python -c "import UltraDict2" && cd {project} && python -m unittest
           # windows cmd needs /d to change drives (runner temp is C:, checkout is D:)
-          CIBW_TEST_COMMAND_WINDOWS: python -c "import UltraDict" && cd /d {project} && python -m unittest
+          CIBW_TEST_COMMAND_WINDOWS: python -c "import UltraDict2" && cd /d {project} && python -m unittest
           # cffi (via atomics2) lacks prebuilt wheels on some arch/python
           # combos; its source build needs libffi headers
           CIBW_BEFORE_TEST_LINUX: yum -y install libffi-devel || apk add --no-cache libffi-dev

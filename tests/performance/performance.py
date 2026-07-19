@@ -100,8 +100,8 @@ def main():
     ## UltraDict
     ##
 
-    import UltraDict
-    ultra = UltraDict.UltraDict()
+    import UltraDict2
+    ultra = UltraDict2.UltraDict()
 
     # UltraDict (writes)
     t_start = time.perf_counter()

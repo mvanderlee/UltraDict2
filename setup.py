@@ -10,7 +10,7 @@ long_description = (this_directory / "readme.md").read_text()
 
 # The extension must live inside the package, otherwise the pure-python
 # package shadows the top-level compiled module and it is never imported
-ext = Extension(name="UltraDict.UltraDict", sources=["UltraDict.py"])
+ext = Extension(name="UltraDict2.UltraDict2", sources=["UltraDict2.py"])
 
 
 class build_py(_build_py):
@@ -26,10 +26,10 @@ setup(
     long_description_content_type='text/markdown',
     author='Ronny Rentner',
     author_email='ultradict.code@ronny-rentner.de',
-    url='https://github.com/ronny-rentner/UltraDict',
+    url='https://github.com/mvanderlee/UltraDict2',
     cmdclass={'build_ext': Cython.Build.build_ext, 'build_py': build_py},
-    package_dir={'UltraDict': '.'},
-    packages=['UltraDict'],
+    package_dir={'UltraDict2': '.'},
+    packages=['UltraDict2'],
     zip_safe=False,
     ext_modules=Cython.Build.cythonize(ext, compiler_directives={'language_level' : "3"}),
     setup_requires=['cython>=0.24.1'],

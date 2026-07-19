@@ -10,7 +10,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from UltraDict import UltraDict
+from UltraDict2 import UltraDict
 
 import multiprocessing, time, signal, subprocess
 
