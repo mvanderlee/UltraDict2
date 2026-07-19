@@ -18,4 +18,4 @@
 # limitations under the License.
 #
 
-from .UltraDict2 import UltraDict
+from .UltraDict2 import DEFAULT_LOCK_TIMEOUT, UltraDict

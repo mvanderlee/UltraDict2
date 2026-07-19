@@ -41,6 +41,10 @@ import logging as log
 
 from . import Exceptions
 
+# Seconds a waiter tolerates no progress before checking whether the lock owner died. It does not
+# bound the wait: a live owner is waited on for as long as it keeps working.
+DEFAULT_LOCK_TIMEOUT = 5.0
+
 
 def remove_shm_from_resource_tracker():
     """
@@ -93,11 +97,17 @@ class UltraDict(collections.UserDict, dict):
 
         __slots__ = 'parent', 'has_lock',  'ctx', 'lock_atomic', 'lock_remote', \
             'pid', 'pid_bytes', 'pid_remote', 'pid_remote_ctx', 'pid_remote_atomic', \
-            'next_acquire_parameters', 'lock_time_remote', 'thread_lock', 'owner_tid'
+            'next_acquire_parameters', 'lock_time_remote', 'thread_lock', 'owner_tid', \
+            'default_acquire_parameters'
 
-        def __init__(self, parent, lock_name, pid_name, time_name='lock_time_remote'):
+        def __init__(self, parent, lock_name, pid_name, time_name='lock_time_remote',
+                lock_timeout: "float | None" = DEFAULT_LOCK_TIMEOUT):
             self.has_lock = 0
-            self.next_acquire_parameters = ()
+            # Applied to every `with lock:` because __enter__ resets to these afterwards. Waiting
+            # forever on a holder that died is never useful, so recovery is on by default; set
+            # lock_timeout=None to wait indefinitely instead.
+            self.default_acquire_parameters = (True, lock_timeout, 0.000001, True) if lock_timeout else ()
+            self.next_acquire_parameters = self.default_acquire_parameters
 
             # Gate for threads of the same process sharing this instance; `has_lock`
             # alone is not thread-safe (check-then-act race)
@@ -155,11 +165,13 @@ class UltraDict(collections.UserDict, dict):
                     time_passed = time.monotonic() - time_start
 
                     if time_passed >= timeout:
-                        # Cannot steal from our own process (another thread or another
-                        # instance of the same process holds the lock and is alive)
-                        if steal_after_timeout and blocking_pid != self.pid:
-                            # If the blocking pid has changed meanwhile, someone else took or stole the lock
-                            if blocking_pid == e.blocking_pid:
+                        if steal_after_timeout:
+                            # A live holder is not an error, it is just contention, so the timeout
+                            # only drives periodic dead-owner recovery and we keep waiting. Our own
+                            # process is never stealable (another of our threads holds it and is by
+                            # definition alive), and a changed blocking pid means someone else took
+                            # or stole the lock meanwhile.
+                            if blocking_pid != self.pid and blocking_pid == e.blocking_pid:
                                 self.steal_from_dead(from_pid=blocking_pid, release=True)
                             time_start = None
                             blocking_pid = None
@@ -250,7 +262,7 @@ class UltraDict(collections.UserDict, dict):
             self.owner_tid = 0
 
         def reset_acquire_parameters(self):
-            self.next_acquire_parameters = ()
+            self.next_acquire_parameters = self.default_acquire_parameters
 
         def steal(self, from_pid=0, release=False):
             if self.has_lock:
@@ -287,6 +299,10 @@ class UltraDict(collections.UserDict, dict):
         def steal_from_dead(self, from_pid=0, release=False):
             """ Check if from_pid is actually a dead process and if yes, steal the lock from it.
                 Optionally, the lock can be directly released after stealing it.
+
+                Returns True if the lock was stolen. A holder that is still alive is not an error,
+                it just means there is nothing to recover: we return False so the caller can keep
+                waiting for it to finish.
             """
 
             # Phantom lock: the owner died between setting the lock byte and writing its
@@ -308,7 +324,8 @@ class UltraDict(collections.UserDict, dict):
                     # lock was acquired, it cannot be the actual lock owner
                     lock_time_ms = int.from_bytes(self.lock_time_remote, 'little')
                     if not (lock_time_ms and p.create_time() * 1000 > lock_time_ms):
-                        raise Exception(f"Trying to steal lock from process that is still alive, something seems really wrong from_pid={from_pid} pid={self.pid} p={p}")
+                        # Owner is alive and really is the owner, so it is simply still working.
+                        return False
             except psutil.NoSuchProcess:
                 # If the process is already gone, we cannot find information about it.
                 # It will be safe to steal the lock.
@@ -371,7 +388,7 @@ class UltraDict(collections.UserDict, dict):
 
             return self
 
-    __slots__ = 'name', 'control', 'buffer', 'buffer_size', 'lock', 'shared_lock', \
+    __slots__ = 'name', 'control', 'buffer', 'buffer_size', 'lock', 'shared_lock', 'lock_timeout', \
         'update_stream_position', 'update_stream_position_remote', \
         'full_dump_counter', 'full_dump_memory', 'full_dump_size', \
         'serializer', \
@@ -387,7 +404,8 @@ class UltraDict(collections.UserDict, dict):
         'finalizer'
 
     def __init__(self, *args, name=None, create=None, buffer_size=10_000, serializer=pickle, shared_lock=None, full_dump_size=None,
-            auto_unlink=None, recurse=None, recurse_register=None, **kwargs):
+            auto_unlink=None, recurse=None, recurse_register=None,
+            lock_timeout: "float | None" = DEFAULT_LOCK_TIMEOUT, **kwargs):
         # pylint: disable=too-many-branches, too-many-statements
 
         # On win32, only multiples of 4k are allowed
@@ -494,7 +512,7 @@ class UltraDict(collections.UserDict, dict):
         # Local lock for all processes and threads created by the same interpreter
         if shared_lock:
             try:
-                self.lock = self.SharedLock(self, 'lock_remote', 'lock_pid_remote')
+                self.lock = self.SharedLock(self, 'lock_remote', 'lock_pid_remote', lock_timeout=lock_timeout)
             except NameError:
                 #self.cleanup()
                 raise Exceptions.MissingDependency("Install `atomics2` Python package to use shared_lock=True") from None
@@ -502,6 +520,7 @@ class UltraDict(collections.UserDict, dict):
             self.lock = multiprocessing.RLock()
 
         self.shared_lock = shared_lock
+        self.lock_timeout = lock_timeout
 
         # Parameters that could be read from remote if we are connecting to an existing UltraDict
         self.recurse = recurse
@@ -520,7 +539,7 @@ class UltraDict(collections.UserDict, dict):
             # If no register was defined, we should create one
             else:
                 self.recurse_register = UltraDict(name=f'{self.name}_register',
-                    recurse=False, auto_unlink=False, shared_lock=self.shared_lock)
+                    recurse=False, auto_unlink=False, shared_lock=self.shared_lock, lock_timeout=lock_timeout)
                 # The register should not run its own finalizer if we need it later for unlinking our nested children
                 if self.auto_unlink:
                     self.recurse_register.finalizer.detach()
@@ -915,7 +934,8 @@ class UltraDict(collections.UserDict, dict):
                                      auto_unlink      = False,
                                      shared_lock      = self.shared_lock,
                                      buffer_size      = self.buffer_size,
-                                     full_dump_size   = self.full_dump_size)
+                                     full_dump_size   = self.full_dump_size,
+                                     lock_timeout     = self.lock_timeout)
 
                     if item.name not in self.recurse_register.data:
                         self.recurse_register[item.name] = True

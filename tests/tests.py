@@ -1,6 +1,6 @@
 import unittest
 import subprocess
-import os, sys
+import os, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
@@ -173,6 +173,44 @@ class UltraDictTests(unittest.TestCase):
         ret = self.exec(filename)
         self.assertReturnCode(ret)
         self.assertEqual(ret.stdout.splitlines()[-1], b"Counter: 100 == 100", self.exec_show_output(ret))
+
+    def test_plain_with_recovers_lock_from_dead_owner(self):
+        """A bare `with lock:` recovers a lock whose owner died holding it."""
+        timeout = 1.0
+        ultra = UltraDict(shared_lock=True, lock_timeout=timeout)
+
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Acquire the shared lock in another process, then die hard without releasing it
+        code = (
+            f"import os, sys; sys.path.insert(0, {repo_dir!r});"
+            "from UltraDict2 import UltraDict;"
+            f"u = UltraDict(name={ultra.name!r}, shared_lock=True);"
+            "u.lock.acquire();"
+            "os._exit(0)"
+        )
+        ret = subprocess.run([sys.executable, '-c', code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(ret.returncode, 0, ret.stdout.decode())
+        self.assertEqual(ultra.lock.get_remote_lock(), 1, "expected the dead child to still hold the lock")
+
+        start = time.monotonic()
+        with ultra.lock:
+            ultra['recovered'] = True
+        elapsed = time.monotonic() - start
+
+        self.assertGreaterEqual(elapsed, timeout, f"recovered before the timeout elapsed ({elapsed:.2f}s)")
+        self.assertLess(elapsed, 30, f"never recovered, waited {elapsed:.2f}s")
+        self.assertEqual(ultra['recovered'], True)
+
+    def test_steal_from_live_owner_returns_false(self):
+        """A live owner is contention, not corruption: nothing to steal and no exception."""
+        ultra = UltraDict(shared_lock=True)
+        other = UltraDict(name=ultra.name, shared_lock=True)
+
+        ultra.lock.acquire()
+        try:
+            self.assertFalse(other.lock.steal_from_dead(from_pid=os.getpid()))
+        finally:
+            ultra.lock.release()
 
 
 if __name__ == '__main__':
