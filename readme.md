@@ -113,7 +113,7 @@ Python 3.11 on linux
 >>> ultra = UltraDict(recurse=True)
 >>> ultra['nested'] = { 'counter': 0 }
 >>> type(ultra['nested'])
-<class 'UltraDict.UltraDict'>
+<class 'UltraDict2.UltraDict2.UltraDict'>
 >>> ultra.name
 'psm_0a2713e4'
 ```
