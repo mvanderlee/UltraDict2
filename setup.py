@@ -20,7 +20,7 @@ class build_py(_build_py):
 
 
 setup(
-    name='UltraDict-wheels',
+    name='UltraDict2',
     description='Sychronized, streaming dictionary that uses shared memory as a backend',
     long_description=long_description,
     long_description_content_type='text/markdown',
