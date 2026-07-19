@@ -73,7 +73,7 @@ There are many alternatives:
 
 In one Python REPL:
 ```python
-Python 3.9.2 on linux
+Python 3.11 on linux
 >>>
 >>> from UltraDict2 import UltraDict
 >>> ultra = UltraDict({ 1:1 }, some_key='some_value')
@@ -87,7 +87,7 @@ Python 3.9.2 on linux
 
 In another Python REPL:
 ```python
-Python 3.9.2 on linux
+Python 3.11 on linux
 >>>
 >>> from UltraDict2 import UltraDict
 >>> # Connect to the shared memory with the name above
@@ -107,7 +107,7 @@ Back in the first Python REPL:
 
 In one Python REPL:
 ```python
-Python 3.9.2 on linux
+Python 3.11 on linux
 >>>
 >>> from UltraDict2 import UltraDict
 >>> ultra = UltraDict(recurse=True)
@@ -120,7 +120,7 @@ Python 3.9.2 on linux
 
 In another Python REPL:
 ```python
-Python 3.9.2 on linux
+Python 3.11 on linux
 >>>
 >>> from UltraDict2 import UltraDict
 >>> other = UltraDict(name='psm_0a2713e4')
@@ -141,7 +141,7 @@ Note that this comparison is not a real life workload. It was executed on Debian
 with Redis installed from the Debian package and with the default configuration of Redis.
 
 ```python
-Python 3.9.2 on linux
+Python 3.11 on linux
 >>>
 >>> from UltraDict2 import UltraDict
 >>> ultra = UltraDict()
@@ -390,7 +390,7 @@ See [examples](/examples) folder
  'name': 'my-name',
  'recurse': False,
  'recurse_remote': <memory at 0x7fcbf5ca6700>,
- 'serializer': <module 'pickle' from '/usr/lib/python3.9/pickle.py'>,
+ 'serializer': <module 'pickle' from '/usr/lib/python3.11/pickle.py'>,
  'shared_lock_remote': <memory at 0x7fcbf5ca6640>,
  'update_stream_position': 0,
  'update_stream_position_remote': 0}
