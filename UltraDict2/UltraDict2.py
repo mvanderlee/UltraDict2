@@ -100,6 +100,10 @@ class UltraDict(collections.UserDict, dict):
             'next_acquire_parameters', 'lock_time_remote', 'thread_lock', 'owner_tid', \
             'default_acquire_parameters'
 
+        # How long a suspected phantom lock must hold perfectly still before it is stolen
+        phantom_watch_time = 0.1
+        phantom_watch_interval = 0.001
+
         def __init__(self, parent, lock_name, pid_name, time_name='lock_time_remote',
                 lock_timeout: "float | None" = DEFAULT_LOCK_TIMEOUT):
             self.has_lock = 0
@@ -307,9 +311,21 @@ class UltraDict(collections.UserDict, dict):
 
             # Phantom lock: the owner died between setting the lock byte and writing its
             # pid (or between clearing the pid and the lock byte on release). There is no
-            # process to check. Stealing is race-safe because both a live acquirer and we
-            # claim the pid via cmpxchg from zero, so only one of us can win.
+            # process to check. A live holder caught mid-release shows the same state
+            # (byte set, pid 0) for a moment though, and stealing from it double-releases
+            # the lock. A true phantom is frozen: while the byte is stuck set nobody can
+            # acquire, so pid, byte and timestamp cannot change. Watch the state and only
+            # steal if it holds still the whole time.
+            # ponytail: a holder preempted longer than the watch inside the two-write
+            # release window is still misread as a phantom; raise the watch time if that
+            # ever shows up in the wild
             if from_pid == 0:
+                lock_time = bytes(self.lock_time_remote)
+                for _ in range(int(self.phantom_watch_time / self.phantom_watch_interval)):
+                    time.sleep(self.phantom_watch_interval)
+                    if self.get_remote_pid() != 0 or not self.get_remote_lock() \
+                            or bytes(self.lock_time_remote) != lock_time:
+                        return False
                 return self.steal(from_pid=0, release=release)
 
             try:

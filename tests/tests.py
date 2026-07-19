@@ -1,6 +1,6 @@
 import unittest
 import subprocess
-import os, sys, time
+import os, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
@@ -211,6 +211,32 @@ class UltraDictTests(unittest.TestCase):
             self.assertFalse(other.lock.steal_from_dead(from_pid=os.getpid()))
         finally:
             ultra.lock.release()
+
+    def test_frozen_phantom_lock_is_stolen(self):
+        """A phantom lock (byte set, pid 0, no activity) left by a dead owner is recovered."""
+        ultra = UltraDict(shared_lock=True)
+        ultra.lock.lock_remote[0:1] = b'\x01'
+
+        self.assertTrue(ultra.lock.steal_from_dead(from_pid=0, release=True))
+        self.assertEqual(ultra.lock.get_remote_lock(), 0)
+        self.assertEqual(ultra.lock.get_remote_pid(), 0)
+
+    def test_live_release_window_is_not_stolen_as_phantom(self):
+        """A live holder caught mid-release also shows (byte set, pid 0); any activity
+        during the phantom watch means it is not a phantom and must not be stolen."""
+        ultra = UltraDict(shared_lock=True)
+        ultra.lock.lock_remote[0:1] = b'\x01'
+
+        def touch_lock_time():
+            ultra.lock.lock_time_remote[:] = int(time.time() * 1000).to_bytes(8, 'little')
+
+        timer = threading.Timer(0.02, touch_lock_time)
+        timer.start()
+        try:
+            self.assertFalse(ultra.lock.steal_from_dead(from_pid=0))
+        finally:
+            timer.join()
+        self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
 
 
 if __name__ == '__main__':
