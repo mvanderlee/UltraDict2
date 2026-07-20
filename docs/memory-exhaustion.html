@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UltraDict2 — What happens when memory fills</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/panzoom@9/dist/panzoom.min.js"></script>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --fg: #1c1b19;
+    --muted: #6b6862;
+    --rule: #e0ddd6;
+    --panel: #ffffff;
+    --accent: #8a5a2b;
+    --ok: #2f6b3d;
+    --warn: #9a6a00;
+    --bad: #a32c22;
+    --code-bg: #f3f1ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f;
+      --fg: #ece8df;
+      --muted: #9d978a;
+      --rule: #33302a;
+      --panel: #1e1d16;
+      --accent: #d9a05b;
+      --ok: #7bbd8a;
+      --warn: #e0b24f;
+      --bad: #e8796c;
+      --code-bg: #24221b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16150f; --fg: #ece8df; --muted: #9d978a; --rule: #33302a;
+    --panel: #1e1d16; --accent: #d9a05b; --ok: #7bbd8a; --warn: #e0b24f;
+    --bad: #e8796c; --code-bg: #24221b;
+  }
+  :root[data-theme="light"] {
+    --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b6862; --rule: #e0ddd6;
+    --panel: #ffffff; --accent: #8a5a2b; --ok: #2f6b3d; --warn: #9a6a00;
+    --bad: #a32c22; --code-bg: #f3f1ec;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 ui-serif, Georgia, "Times New Roman", serif;
+    margin: 0;
+    padding: 0 1.25rem 6rem;
+    overflow-x: hidden;
+  }
+  .wrap { max-width: 54rem; margin: 0 auto; }
+
+  header {
+    padding: 4rem 0 2.5rem;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 3rem;
+  }
+  h1 {
+    font-size: clamp(1.9rem, 5vw, 2.9rem);
+    line-height: 1.1;
+    margin: 0 0 .75rem;
+    letter-spacing: -0.02em;
+  }
+  .sub { color: var(--muted); font-size: 1.05rem; margin: 0; max-width: 42rem; }
+
+  h2 {
+    font-size: 1.55rem;
+    margin: 3.5rem 0 .5rem;
+    letter-spacing: -0.01em;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.12rem; margin: 2rem 0 .4rem; }
+  h2 .num {
+    display: inline-block;
+    font: 600 .8em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent);
+    margin-right: .6rem;
+  }
+
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent); }
+
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .88em;
+  }
+  :not(pre) > code {
+    background: var(--code-bg);
+    padding: .1em .35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: .9rem 1rem;
+    overflow-x: auto;
+    font-size: .85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  .verdict {
+    display: inline-block;
+    font: 600 .7rem/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: .35em .6em;
+    border-radius: 3px;
+    vertical-align: .25em;
+    margin-left: .5rem;
+  }
+  .v-ok   { background: color-mix(in srgb, var(--ok) 16%, transparent);   color: var(--ok); }
+  .v-warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .v-bad  { background: color-mix(in srgb, var(--bad) 15%, transparent);  color: var(--bad); }
+
+  .facts {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 6px 6px 0;
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+  }
+  .facts dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: .45rem 1.1rem; }
+  .facts dt {
+    font: 600 .72rem/1.5 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: .18em;
+  }
+  .facts dd { margin: 0; }
+  @media (max-width: 34rem) {
+    .facts dl { grid-template-columns: 1fr; gap: .15rem; }
+    .facts dd { margin-bottom: .7rem; }
+  }
+
+  .tablewrap { overflow-x: auto; margin: 1.5rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font: 600 .72rem/1.5 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .segmap { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; }
+  @media (max-width: 44rem) { .segmap { grid-template-columns: 1fr; } }
+  .seg {
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 0 5px 5px;
+    padding: .85rem 1rem 1rem;
+  }
+  .seg-h { display: flex; flex-direction: column; gap: .15rem; margin-bottom: .5rem; }
+  .seg-n { font-weight: 700; font-size: 1.02rem; }
+  .seg-s {
+    font: .72rem/1.4 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .seg p { margin: 0; font-size: .9rem; color: var(--muted); }
+
+  .bytemap { border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); padding: 1rem; }
+  .bm-row { display: flex; height: 2.6rem; border-radius: 3px; overflow: hidden; }
+  .bm-cell {
+    min-width: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    white-space: nowrap;
+    font: .68rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--bg);
+    background: var(--accent);
+    border-right: 1px solid var(--panel);
+  }
+  .bm-cell:not(.bm-wide):not(.bm-free) { font-size: 0; }
+  .bm-wide { background: color-mix(in srgb, var(--accent) 78%, var(--fg)); font-size: .72rem; }
+  .bm-free {
+    background: repeating-linear-gradient(45deg, var(--code-bg), var(--code-bg) 5px, var(--panel) 5px, var(--panel) 10px);
+    color: var(--muted);
+    border: 1px dashed var(--rule);
+    font-size: .72rem;
+  }
+  .bm-scale {
+    display: flex;
+    justify-content: space-between;
+    margin-top: .35rem;
+    font: .68rem ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted);
+  }
+
+  figure { margin: 1.75rem 0; }
+  .diagram {
+    position: relative;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--panel);
+    overflow: hidden;
+    cursor: grab;
+  }
+  .diagram:active { cursor: grabbing; }
+  .diagram .mermaid { display: flex; justify-content: center; padding: 1rem; }
+  .diagram svg { max-width: 100%; height: auto; }
+  figcaption {
+    font-size: .82rem;
+    color: var(--muted);
+    margin-top: .5rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  .zoomhint {
+    position: absolute;
+    top: .5rem;
+    right: .5rem;
+    display: flex;
+    gap: .4rem;
+    align-items: center;
+    font: .68rem/1 ui-sans-serif, system-ui, sans-serif;
+    color: var(--muted);
+  }
+  .fsbtn {
+    font: inherit;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: .35em .55em;
+    cursor: pointer;
+  }
+  .fsbtn:hover { color: var(--fg); border-color: var(--accent); }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--bg) 96%, transparent);
+    display: none;
+    z-index: 100;
+  }
+  #overlay.on { display: block; }
+  #overlay .stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #overlay svg { max-width: 92vw; max-height: 88vh; }
+  #overlay .close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    z-index: 2;
+    font: .8rem ui-sans-serif, system-ui, sans-serif;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: .5em .8em;
+    cursor: pointer;
+  }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: .85rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>What happens when UltraDict2 runs out of memory</h1>
+  <p class="sub">Four distinct failure modes, only one of which is designed. This describes
+  current behaviour in the code as it stands, not what it ought to do. Line references are to
+  <code>UltraDict2/UltraDict2.py</code>.</p>
+</header>
+
+<p>UltraDict2 keeps a dict in POSIX shared memory across processes. Three separate shared
+segments are involved, and they exhaust in three different ways, with a fourth mode where
+nothing is exhausted at all but a reader still fails. Knowing which one you are looking at is
+the difference between raising <code>buffer_size</code> and hunting a leak.</p>
+
+<h2><span class="num">§0</span>The three segments</h2>
+
+<p>A dict named <code>N</code> owns a fixed 1000-byte <strong>control</strong> segment, an
+<strong>update buffer</strong> named <code>N_memory</code>, and one or more
+<strong>full dump</strong> segments. Writes normally append a serialized frame to the update
+buffer. When that buffer cannot fit the next frame, the whole dict is serialized into a full
+dump segment instead and the buffer is reset to empty.</p>
+
+<figure>
+  <div class="segmap">
+    <div class="seg">
+      <div class="seg-h"><span class="seg-n">Control</span><span class="seg-s">1000 bytes, fixed</span></div>
+      <p>Named after the dict itself. Holds the buffer fill level, the dump counter and the
+      name of the current dump segment. Every process reads it constantly.</p>
+    </div>
+    <div class="seg">
+      <div class="seg-h"><span class="seg-n">Update buffer</span><span class="seg-s"><code>buffer_size</code>, fixed</span></div>
+      <p>Named <code>&lt;dict&gt;_memory</code>. An append-only stream of serialized changes.
+      Never wraps — it is reset to empty by a full dump.</p>
+    </div>
+    <div class="seg">
+      <div class="seg-h"><span class="seg-n">Full dump</span><span class="seg-s"><code>full_dump_size</code>, or sized per dump</span></div>
+      <p>A complete snapshot of the dict. With no static size, a fresh segment is allocated
+      for every dump and the previous one unlinked.</p>
+    </div>
+  </div>
+  <figcaption>Three segments per dict. Only the control segment has a size you cannot get wrong.</figcaption>
+</figure>
+
+<p>The control segment is the coordination point. Its layout is packed into the first 284
+bytes; the remaining 716 bytes are unused today.</p>
+
+<figure>
+  <div class="bytemap" role="img" aria-label="Control segment byte layout, 284 of 1000 bytes used">
+    <div class="bm-row">
+      <span class="bm-cell" style="flex: 4"  title="0:4">pos</span>
+      <span class="bm-cell" style="flex: 4"  title="4:8">pid</span>
+      <span class="bm-cell" style="flex: 2"  title="8:10">lk</span>
+      <span class="bm-cell" style="flex: 4"  title="10:14">cnt</span>
+      <span class="bm-cell" style="flex: 4"  title="14:18">size</span>
+      <span class="bm-cell" style="flex: 2"  title="18:20">ff</span>
+      <span class="bm-cell bm-wide" style="flex: 255" title="20:275">full_dump_memory_name</span>
+      <span class="bm-cell" style="flex: 8"  title="275:283">time</span>
+      <span class="bm-cell" style="flex: 1"  title="283:284">r</span>
+      <span class="bm-cell bm-free" style="flex: 716" title="284:1000">unused, 716 bytes</span>
+    </div>
+    <div class="bm-scale"><span>0</span><span>284</span><span>1000</span></div>
+  </div>
+  <figcaption>Widths are to scale. The name field dominates; everything that changes at runtime lives in the first 20 bytes.</figcaption>
+</figure>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Bytes</th><th>Field</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">0:4</td><td class="mono">update_stream_position</td><td>How full the update buffer is. This is the authoritative fill level.</td></tr>
+    <tr><td class="mono">4:8</td><td class="mono">lock_pid</td><td>PID of the current lock holder.</td></tr>
+    <tr><td class="mono">8:10</td><td class="mono">lock</td><td>Lock state.</td></tr>
+    <tr><td class="mono">10:14</td><td class="mono">full_dump_counter</td><td>Incremented on every dump. Readers compare against their local copy.</td></tr>
+    <tr><td class="mono">14:18</td><td class="mono">full_dump_static_size</td><td>Non-zero only when a static <code>full_dump_size</code> was configured.</td></tr>
+    <tr><td class="mono">18:19</td><td class="mono">shared_lock</td><td>Flag.</td></tr>
+    <tr><td class="mono">19:20</td><td class="mono">recurse</td><td>Flag.</td></tr>
+    <tr><td class="mono">20:275</td><td class="mono">full_dump_memory_name</td><td>Name of the current dump segment, so readers can find it.</td></tr>
+    <tr><td class="mono">275:283</td><td class="mono">lock_time</td><td>Lock acquisition timestamp.</td></tr>
+    <tr><td class="mono">283:284</td><td class="mono">ready</td><td>Creator finished initialising.</td></tr>
+    <tr><td class="mono">284:1000</td><td class="mono">—</td><td>Unused.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="num">§1</span>The update buffer fills <span class="verdict v-ok">By design</span></h2>
+
+<p>This is the common case and it is not an error. <code>append_update()</code> serializes the
+change, then checks whether the frame fits:</p>
+
+<pre><code>if end_position &gt; self.buffer_size:          # :854
+    self.apply_update()
+    if not delete:
+        self.data.__setitem__(key, item)
+    self.dump()
+    return</code></pre>
+
+<p>Note what this costs. A write that overflows does not get appended to the stream at all — it
+reaches the other processes only inside the full dump. So a 20-byte write to a 500 MB dict can
+trigger a 500 MB serialization. Peers then discover the new
+<code>full_dump_counter</code> and each reloads the entire dict.</p>
+
+<figure>
+  <div class="diagram" data-idx="0">
+    <div class="zoomhint"><span>scroll to zoom, drag to pan</span><button class="fsbtn" data-fs="0">Fullscreen</button></div>
+    <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant W as Writer
+    participant B as Update buffer
+    participant C as Control
+    participant D as Dump memory
+    participant R as Reader
+
+    W->>B: append frame
+    W->>C: position += frame size
+    R->>C: read position
+    R->>B: replay new frames
+
+    Note over W,B: next frame does not fit
+
+    W->>W: apply_update then set locally
+    W->>D: serialize the whole dict
+    W->>C: publish dump name
+    W->>C: full_dump_counter += 1
+    W->>C: position = 0
+
+    R->>C: counter changed
+    R->>D: load full dump
+    R->>R: discard local stream position
+    </pre>
+  </div>
+  <figcaption>Every buffer overflow costs a full serialization on the writer and a full reload on every reader.</figcaption>
+</figure>
+
+<div class="facts">
+  <dl>
+    <dt>Symptom</dt><dd>No exception. Throughput drops, CPU rises, all readers stall together in bursts.</dd>
+    <dt>Metric</dt><dd><code>buffer_full_forced_dump_total</code> climbing; <code>buffer_used_fraction</code> sawtoothing to near 1 and back to 0.</dd>
+    <dt>Fix</dt><dd>Raise <code>buffer_size</code> until the rate drops to something you are happy paying.</dd>
+  </dl>
+</div>
+
+<h2><span class="num">§2</span>The full dump memory is too small <span class="verdict v-bad">Hard failure</span></h2>
+
+<p>Only reachable with a static <code>full_dump_size</code>. That segment is allocated once at
+construction and is never resized, so once the dict outgrows it, <code>dump()</code> raises:</p>
+
+<pre><code>if length + 6 &gt; full_dump_memory.size:        # :700
+    raise Exceptions.FullDumpMemoryFull(...)</code></pre>
+
+<p>The exception propagates out through <code>dump()</code>, <code>append_update()</code> and
+<code>__setitem__</code> to your code. The important part is the state it leaves behind. Look at
+the overflow branch in §1 again: <code>self.data[key] = item</code> ran <em>before</em>
+<code>self.dump()</code>. So:</p>
+
+<ul>
+  <li>the writing process has the new item in its local <code>data</code>;</li>
+  <li>the frame was never appended to the stream, so no peer will ever see it;</li>
+  <li>the buffer is still full, so the <em>next</em> write takes the same branch and raises again.</li>
+</ul>
+
+<p>The dict is now permanently wedged for writes and silently divergent between processes. This
+is not a transient error you can retry.</p>
+
+<figure>
+  <div class="diagram" data-idx="1">
+    <div class="zoomhint"><span>scroll to zoom, drag to pan</span><button class="fsbtn" data-fs="1">Fullscreen</button></div>
+    <pre class="mermaid">
+flowchart TD
+    A["__setitem__"] --> B["append_update serializes frame"]
+    B --> C{"frame fits in buffer?"}
+    C -->|yes| D["write frame, bump position"]
+    D --> E["peers see it"]
+    C -->|no| F["set self.data locally"]
+    F --> G["dump serializes whole dict"]
+    G --> H{"dict fits in dump memory?"}
+    H -->|yes| I["publish dump, reset position"]
+    I --> E
+    H -->|no| J["raise FullDumpMemoryFull"]
+    J --> K["local data has the item"]
+    J --> L["peers never see it"]
+    J --> M["buffer still full, next write repeats"]
+    </pre>
+  </div>
+  <figcaption>The torn state after FullDumpMemoryFull. The two right-hand leaves are the divergence.</figcaption>
+</figure>
+
+<div class="facts">
+  <dl>
+    <dt>Symptom</dt><dd><code>UltraDict2.Exceptions.FullDumpMemoryFull</code> on a write, then on every subsequent write.</dd>
+    <dt>Metric</dt><dd><code>full_dump_memory_full_total</code> non-zero. Watch <code>item_size_bytes_sum</code> against <code>full_dump_size_bytes</code> to see it coming.</dd>
+    <dt>Fix</dt><dd>Size <code>full_dump_size</code> for the largest dict you will ever hold, not the current one. On Linux, prefer omitting it entirely so dumps size themselves.</dd>
+  </dl>
+</div>
+
+<h2><span class="num">§3</span>The system runs out of shared memory <span class="verdict v-bad">Unwrapped</span></h2>
+
+<p>With no static <code>full_dump_size</code>, every dump allocates a brand-new segment sized to
+fit, then unlinks the previous one:</p>
+
+<pre><code>full_dump_memory = self.get_memory(create=True, size=length + 6)   # :693
+...
+if old and old != full_dump_memory.name and not self.full_dump_size:
+    self.unlink_by_name(old)                                       # :740</code></pre>
+
+<p>Steady state is therefore two live dump segments at most. But the allocate-then-unlink order
+means a process that dies between those two lines leaks the old segment permanently. Nothing
+reclaims it: <code>/dev/shm</code> entries survive the process that made them. Repeat that under
+a crash loop and tmpfs fills.</p>
+
+<p>When it does, <code>SharedMemory(create=True, ...)</code> at <code>:661</code> raises a plain
+<code>OSError</code> with <code>errno 28</code>. UltraDict2 does not catch or wrap it — it only
+handles <code>FileExistsError</code> and <code>FileNotFoundError</code>. So at the API level,
+"the machine is out of shared memory" is indistinguishable from any other OS error, and it
+surfaces from an ordinary-looking <code>d[k] = v</code>.</p>
+
+<figure>
+  <div class="diagram" data-idx="2">
+    <div class="zoomhint"><span>scroll to zoom, drag to pan</span><button class="fsbtn" data-fs="2">Fullscreen</button></div>
+    <pre class="mermaid">
+flowchart TD
+    A["dump needs memory"] --> B["allocate new segment sized length + 6"]
+    B --> C["write dump, publish name"]
+    C --> D["unlink previous segment"]
+    B -.->|"process dies here"| E["previous segment leaked"]
+    E --> F["tmpfs usage grows"]
+    F --> G["shm_open returns ENOSPC"]
+    G --> H["raw OSError from __setitem__"]
+    </pre>
+  </div>
+  <figcaption>The leak window. Default tmpfs is half of RAM, so this takes a while to bite and then bites everything on the host.</figcaption>
+</figure>
+
+<div class="facts">
+  <dl>
+    <dt>Symptom</dt><dd><code>OSError: [Errno 28] No space left on device</code> from a dict write. Other processes on the host fail too, not just yours.</dd>
+    <dt>Metric</dt><dd><code>shm_free_bytes</code> trending down and not recovering. Alert well before zero.</dd>
+    <dt>Fix</dt><dd>Find the orphans: <code>ls -la /dev/shm</code>. Anything matching your dict names with no owning process is leaked and can be removed with <code>UltraDict.unlink_by_name(name, ignore_errors=True)</code>.</dd>
+  </dl>
+</div>
+
+<h2><span class="num">§4</span>Readers cannot keep up <span class="verdict v-warn">Recovers, unboundedly</span></h2>
+
+<p>Nothing is exhausted here. The buffer is being recycled faster than a slow reader can replay
+it. Readers replay the stream <em>without</em> a lock, so a dump can reset the buffer under a
+reader mid-replay. Two guards catch it, and both recover the same way: by starting over.</p>
+
+<pre><code># apply_update, on a corrupted read
+if self.full_dump_counter &lt; remote_counter:                 # :925 and :932
+    log.warning("Full dumps too fast ... Consider increasing buffer_size.")
+    return self.apply_update()
+
+# load, when the dump we were reading got unlinked under us
+if full_dump_delta &gt; 1:                                     # :824
+    return self.load(force=True)</code></pre>
+
+<p>Both are unbounded recursion. If the writer keeps dumping faster than the reader can finish a
+reload, the reader recurses until it hits <code>RecursionError</code>. A <code>TODO</code> in
+<code>load()</code> acknowledges this. In practice the warning is the signal: it means you are
+one sustained burst away from a reader crashing.</p>
+
+<figure>
+  <div class="diagram" data-idx="3">
+    <div class="zoomhint"><span>scroll to zoom, drag to pan</span><button class="fsbtn" data-fs="3">Fullscreen</button></div>
+    <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant W as Writer
+    participant C as Control
+    participant R as Reader
+
+    R->>C: read position, begin replay without lock
+    W->>C: dump, counter += 1, position = 0
+    W->>C: dump again, counter += 1
+    R->>R: unpickle garbage, CorruptedStream
+    R->>C: counter moved, so recover
+    R->>R: apply_update again from the top
+    Note over R: writer may have dumped again already
+    R->>R: recursion continues until it catches up
+    </pre>
+  </div>
+  <figcaption>Recovery is correct but has no depth bound. Sustained dump pressure ends in RecursionError.</figcaption>
+</figure>
+
+<div class="facts">
+  <dl>
+    <dt>Symptom</dt><dd>Repeated <code>Full dumps too fast</code> warnings in reader logs. Eventually <code>RecursionError</code> or an escaping <code>CorruptedStream</code>.</dd>
+    <dt>Metric</dt><dd><code>full_dump_too_fast_total</code> climbing on readers, correlated with <code>buffer_full_forced_dump_total</code> on the writer.</dd>
+    <dt>Fix</dt><dd>Raise <code>buffer_size</code> to cut the dump rate, or make readers poll more often so they have less to replay.</dd>
+  </dl>
+</div>
+
+<h2><span class="num">§5</span>Windows and macOS differ</h2>
+
+<p>On Linux a shared segment outlives the process that created it, so the writer can close its
+handle right after dumping. On Windows the mapping is destroyed when the last handle closes, so
+the code deliberately holds the handle open instead:</p>
+
+<pre><code>if not self.full_dump_size and sys.platform != 'win32':   # :714
+    full_dump_memory.close()</code></pre>
+
+<p>The consequence is that on Windows, a dynamically sized dump lives only as long as the process
+that wrote it. If that process exits, later readers get
+<code>CannotAttachSharedMemory</code>. That is why a static <code>full_dump_size</code> is
+recommended on Windows — and it is exactly the configuration that makes §2 reachable. The two
+platforms trade one failure mode for the other.</p>
+
+<p>Also note <code>buffer_size</code> and <code>full_dump_size</code> are rounded up to a 4096
+multiple on Windows, so <code>buffer_size=10_000</code> reports as 12288.</p>
+
+<p>macOS is a third case: it is POSIX and shared memory works, but there is no
+<code>/dev/shm</code> directory to measure, so every <code>shm_*</code> metric is
+<code>None</code> there, as on Windows.</p>
+
+<h2><span class="num">§6</span>Which metric predicts which failure</h2>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Failure</th><th>Leading indicator</th><th>Confirms it happened</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>§1 Buffer fills</td>
+      <td><code>buffer_used_fraction</code> approaching 1</td>
+      <td><code>buffer_full_forced_dump_total</code></td>
+    </tr>
+    <tr>
+      <td>§2 Dump memory too small</td>
+      <td><code>item_size_bytes_sum</code> vs <code>full_dump_size_bytes</code></td>
+      <td><code>full_dump_memory_full_total</code></td>
+    </tr>
+    <tr>
+      <td>§3 System shm exhausted</td>
+      <td><code>shm_free_bytes</code> trending down</td>
+      <td>Raw <code>OSError</code>, errno 28. No metric.</td>
+    </tr>
+    <tr>
+      <td>§4 Reader starvation</td>
+      <td><code>full_dump_total</code> rate</td>
+      <td><code>full_dump_too_fast_total</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>All of these come from <code>ultra.get_metrics()</code>. See the Metrics section of the
+readme for the Prometheus collector.</p>
+
+<h2><span class="num">§7</span>What is not fixed</h2>
+
+<p>This document describes behaviour, it does not change it. Three things are worth fixing and
+are deliberately out of scope here:</p>
+
+<ol>
+  <li>The <code>OSError</code> from §3 should be wrapped in a dedicated exception so callers can
+  distinguish "host out of shared memory" from any other <code>OSError</code>.</li>
+  <li>The recursion in §4 should carry a depth bound and fail with a clear error rather than
+  <code>RecursionError</code>.</li>
+  <li>The torn state in §2 should be repaired: the local <code>data</code> mutation should be
+  rolled back, or applied only after the dump succeeds.</li>
+</ol>
+
+<footer>
+  Behaviour described against <code>UltraDict2/UltraDict2.py</code> on branch
+  <code>feat/metrics</code>. Line numbers drift; the control flow is the durable part.
+</footer>
+
+</div>
+
+<div id="overlay">
+  <button class="close">Close</button>
+  <div class="stage"></div>
+</div>
+
+<script>
+  const dark = () => {
+    const attr = document.documentElement.getAttribute('data-theme');
+    if (attr) return attr === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  };
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: dark() ? 'dark' : 'neutral',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true },
+    sequence: { useMaxWidth: true }
+  });
+
+  const svgElements = [];
+
+  (async () => {
+    await mermaid.run({ querySelector: '.mermaid' });
+
+    document.querySelectorAll('.diagram').forEach((box, i) => {
+      const svg = box.querySelector('svg');
+      svgElements[i] = svg;
+      if (!svg) return;
+      svg.style.maxWidth = '100%';
+      panzoom(svg, {
+        maxZoom: 8,
+        minZoom: 0.4,
+        bounds: true,
+        boundsPadding: 0.15,
+        zoomDoubleClickSpeed: 1
+      });
+    });
+
+    const overlay = document.getElementById('overlay');
+    const stage = overlay.querySelector('.stage');
+    let active = null;
+
+    const close = () => {
+      if (active) { active.dispose(); active = null; }
+      stage.innerHTML = '';
+      overlay.classList.remove('on');
+    };
+
+    document.querySelectorAll('.fsbtn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const src = svgElements[Number(btn.dataset.fs)];
+        if (!src) return;
+        const clone = src.cloneNode(true);
+        clone.style.transform = '';
+        stage.innerHTML = '';
+        stage.appendChild(clone);
+        overlay.classList.add('on');
+        active = panzoom(clone, { maxZoom: 12, minZoom: 0.2, bounds: true, boundsPadding: 0.1 });
+      });
+    });
+
+    overlay.querySelector('.close').addEventListener('click', close);
+    overlay.addEventListener('click', e => { if (e.target === overlay || e.target === stage) close(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  })();
+</script>
+</body>
+</html>
