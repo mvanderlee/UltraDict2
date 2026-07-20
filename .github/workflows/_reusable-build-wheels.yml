@@ -34,56 +34,31 @@ jobs:
             arch: universal2
 
           # linux entries are split per libc so a manylinux failure doesn't
-          # mask a musllinux one (and vice versa)
+          # mask a musllinux one (and vice versa). i686 and aarch64 run on
+          # native runners, so no QEMU here; see build_wheels_emulated.
           - name: "linux-i386-manylinux"
             os: ubuntu-latest
             arch: i686
-            platform: i386
             build: "cp311-manylinux* cp312-manylinux* cp313-manylinux* cp314-manylinux*"
           - name: "linux-i386-musllinux"
             os: ubuntu-latest
             arch: i686
-            platform: i386
             build: "cp311-musllinux* cp312-musllinux* cp313-musllinux* cp314-musllinux*"
           - name: "linux-x86_64-manylinux"
             os: ubuntu-latest
             arch: x86_64
-            platform: x86_64
             build: "cp311-manylinux* cp312-manylinux* cp313-manylinux* cp314-manylinux*"
           - name: "linux-x86_64-musllinux"
             os: ubuntu-latest
             arch: x86_64
-            platform: x86_64
             build: "cp311-musllinux* cp312-musllinux* cp313-musllinux* cp314-musllinux*"
           - name: "linux-aarch64-manylinux"
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             arch: aarch64
-            platform: aarch64
             build: "cp311-manylinux* cp312-manylinux* cp313-manylinux* cp314-manylinux*"
           - name: "linux-aarch64-musllinux"
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             arch: aarch64
-            platform: aarch64
-            build: "cp311-musllinux* cp312-musllinux* cp313-musllinux* cp314-musllinux*"
-          - name: "linux-ppc64le-manylinux"
-            os: ubuntu-latest
-            arch: ppc64le
-            platform: ppc64le
-            build: "cp311-manylinux* cp312-manylinux* cp313-manylinux* cp314-manylinux*"
-          - name: "linux-ppc64le-musllinux"
-            os: ubuntu-latest
-            arch: ppc64le
-            platform: ppc64le
-            build: "cp311-musllinux* cp312-musllinux* cp313-musllinux* cp314-musllinux*"
-          - name: "linux-s390x-manylinux"
-            os: ubuntu-latest
-            arch: s390x
-            platform: s390x
-            build: "cp311-manylinux* cp312-manylinux* cp313-manylinux* cp314-manylinux*"
-          - name: "linux-s390x-musllinux"
-            os: ubuntu-latest
-            arch: s390x
-            platform: s390x
             build: "cp311-musllinux* cp312-musllinux* cp313-musllinux* cp314-musllinux*"
 
     steps:
@@ -92,12 +67,6 @@ jobs:
           # full history and tags so setuptools-scm can derive the version
           fetch-depth: 0
       - uses: actions/setup-python@v6
-
-      - name: Set up QEMU
-        if: ${{ startsWith(matrix.config.os, 'ubuntu') }}
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: ${{ matrix.config.platform }}
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -120,4 +89,43 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: artifact-${{ matrix.config.name }}
+          path: ./wheelhouse/*.whl
+
+  # QEMU-emulated arches only. Split one job per interpreter so the ~5min
+  # per-CPython emulation cost runs in parallel instead of serially.
+  build_wheels_emulated:
+    name: Build wheels on linux-${{ matrix.arch }}-${{ matrix.libc }} ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ppc64le, s390x]
+        libc: [manylinux, musllinux]
+        python: [cp311, cp312, cp313, cp314]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # full history and tags so setuptools-scm can derive the version
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}*
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_TEST_COMMAND: python -c "import UltraDict2" && cd {project} && python -m unittest
+          # cffi (via atomics2) lacks prebuilt wheels on some arch/python
+          # combos; its source build needs libffi headers
+          CIBW_BEFORE_TEST_LINUX: yum -y install libffi-devel || apk add --no-cache libffi-dev
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: artifact-linux-${{ matrix.arch }}-${{ matrix.libc }}-${{ matrix.python }}
           path: ./wheelhouse/*.whl
