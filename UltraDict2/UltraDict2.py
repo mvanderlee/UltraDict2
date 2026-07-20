@@ -37,6 +37,14 @@ try:
 except ModuleNotFoundError:
     pass
 
+try:
+    # Needed to size-check a segment before attaching to it, see wait_until_sized().
+    # Private, but it is what multiprocessing.shared_memory itself uses, so it is present
+    # wherever SharedMemory is.
+    import _posixshmem
+except ImportError:
+    _posixshmem = None
+
 import logging as log
 
 from . import Exceptions
@@ -44,6 +52,11 @@ from . import Exceptions
 # Seconds a waiter tolerates no progress before checking whether the lock owner died. It does not
 # bound the wait: a live owner is waited on for as long as it keeps working.
 DEFAULT_LOCK_TIMEOUT = 5.0
+
+# How long a process attaching to a half-built dict waits for its creator to finish. Creation takes
+# microseconds, so this only has to outlast a scheduling hiccup.
+READY_TIMEOUT = 10.0
+READY_INTERVAL = 0.0005
 
 
 def remove_shm_from_resource_tracker():
@@ -413,6 +426,7 @@ class UltraDict(collections.UserDict, dict):
         'full_dump_counter_remote', \
         'full_dump_static_size_remote', \
         'shared_lock_remote', \
+        'ready_remote', \
         'recurse', 'recurse_remote', 'recurse_register', \
         'full_dump_memory_name_remote', \
         'lock_time_remote', \
@@ -465,6 +479,13 @@ class UltraDict(collections.UserDict, dict):
 
         self.init_remotes()
 
+        # Creating the control memory publishes it, so another process can attach to a dict that is
+        # still being built: its metadata is zeroed and its buffer does not exist yet. Wait for the
+        # creator to signal it is done before reading any of that.
+        created_by_us = hasattr(self.control, 'created_by_ultra')
+        if not created_by_us:
+            self.wait_until_ready()
+
         self.serializer = serializer
 
         # Actual stream buffer that contains marshalled data of changes to the dict
@@ -478,7 +499,7 @@ class UltraDict(collections.UserDict, dict):
         # Warning: Issues on Windows when the process ends that has created the full dump memory
         self.full_dump_size = None
 
-        if hasattr(self.control, 'created_by_ultra'):
+        if created_by_us:
 
             if auto_unlink is None:
                 self.auto_unlink = True
@@ -497,6 +518,9 @@ class UltraDict(collections.UserDict, dict):
 
                 self.full_dump_memory = self.get_memory(create=True, name=self.name + '_full', size=full_dump_size)
                 self.full_dump_memory_name_remote[:] = self.full_dump_memory.name.encode('utf-8').ljust(255)
+
+            # Published last: everything an attaching process reads is now in place.
+            self.ready_remote[0:1] = b'1'
 
         # We just attached to the existing control
         else:
@@ -590,6 +614,25 @@ class UltraDict(collections.UserDict, dict):
         #    del self.recurse_register
 
 
+    def wait_until_ready(self, timeout=READY_TIMEOUT, interval=READY_INTERVAL):
+        """ Block until the process that created this dict has finished initialising it.
+
+            Shared memory is published by the act of creating it, so a dict can be attached to
+            while its creator is still filling in the control block and creating the stream
+            buffer. Reading it before then sees zeroed metadata, which looks exactly like a dict
+            that was created with different parameters.
+
+            A creator that died mid-initialisation never sets the flag, so we time out rather than
+            attach to a dict that will never be complete.
+        """
+        deadline = time.monotonic() + timeout
+        while self.ready_remote[0:1] != b'1':
+            if time.monotonic() >= deadline:
+                raise Exceptions.CannotAttachSharedMemory(
+                    f"Timed out after {timeout}s waiting for the creator of '{self.name}' to finish initialising it"
+                )
+            time.sleep(interval)
+
     def init_remotes(self):
         # Memoryviews to the right buffer position in self.control
         self.update_stream_position_remote = self.control.buf[ 0:  4]
@@ -601,6 +644,7 @@ class UltraDict(collections.UserDict, dict):
         self.recurse_remote                = self.control.buf[19: 20]
         self.full_dump_memory_name_remote  = self.control.buf[20:275]
         self.lock_time_remote              = self.control.buf[275:283]
+        self.ready_remote                  = self.control.buf[283:284]
 
     def del_remotes(self):
         """
@@ -618,6 +662,48 @@ class UltraDict(collections.UserDict, dict):
         return (partial(self.__class__, name=self.name, auto_unlink=self.auto_unlink, recurse_register=self.recurse_register), ())
 
     @staticmethod
+    def wait_until_sized(name, deadline):
+        """ Report whether `name` can be attached to, waiting while it is still being set up.
+
+            Returns True once the segment exists and has a size, False if it does not exist, in
+            which case the caller must create it instead of attaching. Answering that question is
+            the whole point: attaching to a segment that exists but has no size yet fails to mmap,
+            and CPython unlinks the segment before re-raising -- destroying the creator's memory
+            and leaving the next process to create a second, unrelated segment under the same name.
+
+            POSIX publishes a name in shm_open but only gives it a size in the ftruncate that
+            follows, so that window is real, and 'it did not exist a moment ago' is not a safe
+            reason to try attaching: the creator may have got there in between. A size only ever
+            goes from zero to its final value, so once seen there is nothing left to race against.
+
+            Windows has no such window, as the size is supplied when the mapping is created, so
+            there we always report True and let SharedMemory decide.
+        """
+        if _posixshmem is None:
+            return True
+
+        while True:
+            try:
+                fd = _posixshmem.shm_open('/' + name, os.O_RDONLY, mode=0o600)
+            except FileNotFoundError:
+                return False
+            except (PermissionError, ValueError):
+                # Cannot inspect it; let SharedMemory report whatever the real problem is
+                return True
+
+            try:
+                if os.fstat(fd).st_size:
+                    return True
+            finally:
+                os.close(fd)
+
+            if time.monotonic() >= deadline:
+                raise Exceptions.CannotAttachSharedMemory(
+                    f"Timed out waiting for '{name}' to be given a size by the process creating it"
+                )
+            time.sleep(READY_INTERVAL)
+
+    @staticmethod
     def get_memory(*, create=True, name=None, size=0):
         """
         Attach an existing SharedMemory object with `name`.
@@ -627,9 +713,11 @@ class UltraDict(collections.UserDict, dict):
         if create and size <= 0:
             raise ValueError(f"Cannot create memory with size={size}")
 
+        deadline = time.monotonic() + READY_TIMEOUT
         while True:
-            if name:
-                # First try to attach to existing memory
+            # Only attach once it is known to be attachable. Trying anyway when it does not exist
+            # yet races the creator into the window between its shm_open and its ftruncate.
+            if name and UltraDict.wait_until_sized(name, deadline):
                 try:
                     memory = multiprocessing.shared_memory.SharedMemory(name=name, **shm_track_kwargs)
                     #log.debug('Attached shared memory: ', memory.name)
@@ -640,6 +728,7 @@ class UltraDict(collections.UserDict, dict):
 
                     return memory
                 except FileNotFoundError:
+                    # Unlinked between the check and the attach; fall through and create it
                     pass
 
             # No existing memory found

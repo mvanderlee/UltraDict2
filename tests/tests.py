@@ -21,7 +21,9 @@ class UltraDictTests(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         #print(ret.stdout.decode())
         ret.stdout = ret.stdout.replace(b'\r\n', b'\n');
-        self.assertEqual(ret.returncode, 0, f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'")
+        self.assertEqual(ret.returncode, 0,
+                f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
+                f"{self.exec_show_output(ret)}")
         return ret
 
     def exec_show_output(self, ret):
@@ -237,6 +239,137 @@ class UltraDictTests(unittest.TestCase):
         finally:
             timer.join()
         self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
+
+    def _sized_probe(self, path):
+        """Stub shm_open with a real fd on `path`, so fstat/close behave like the real thing."""
+        import UltraDict2.UltraDict2 as ud
+
+        class FakeShm:
+            @staticmethod
+            def shm_open(name, flags, mode=0o600):
+                return os.open(path, os.O_RDONLY)
+
+        return ud, FakeShm
+
+    def test_wait_until_sized_waits_for_the_creator(self):
+        """A segment with no size yet is waited on, not attached to."""
+        import tempfile, threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'segment')
+            open(path, 'wb').close()  # exists, size 0 -- as after shm_open but before ftruncate
+            ud, fake = self._sized_probe(path)
+
+            def give_it_a_size():
+                with open(path, 'wb') as f:
+                    f.write(b'x' * 1000)
+
+            timer = threading.Timer(0.1, give_it_a_size)
+            original = ud._posixshmem
+            ud._posixshmem = fake
+            try:
+                timer.start()
+                start = time.monotonic()
+                ready = ud.UltraDict.wait_until_sized('segment', time.monotonic() + 10)
+                elapsed = time.monotonic() - start
+            finally:
+                ud._posixshmem = original
+                timer.cancel()
+
+            self.assertTrue(ready, "a sized segment must be reported as attachable")
+            self.assertGreaterEqual(elapsed, 0.05, "returned before the segment had a size")
+            self.assertLess(elapsed, 9, "did not notice the segment being sized")
+
+    def test_wait_until_sized_times_out_on_a_dead_creator(self):
+        """A creator that died before ftruncate never sizes it, so we give up rather than hang."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'segment')
+            open(path, 'wb').close()
+            ud, fake = self._sized_probe(path)
+
+            original = ud._posixshmem
+            ud._posixshmem = fake
+            try:
+                with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
+                    ud.UltraDict.wait_until_sized('segment', time.monotonic() + 0.2)
+            finally:
+                ud._posixshmem = original
+
+    def test_wait_until_sized_reports_a_missing_segment_as_not_attachable(self):
+        """A segment that does not exist must not be attached to.
+
+        Reporting it as attachable is what let a process race the creator into the window between
+        its shm_open and its ftruncate, which is the failure this whole check exists to prevent.
+        """
+        import UltraDict2.UltraDict2 as ud
+
+        class Missing:
+            @staticmethod
+            def shm_open(name, flags, mode=0o600):
+                raise FileNotFoundError(name)
+
+        original = ud._posixshmem
+        ud._posixshmem = Missing
+        try:
+            self.assertFalse(ud.UltraDict.wait_until_sized('nope', time.monotonic() + 10))
+        finally:
+            ud._posixshmem = original
+
+    @unittest.skipIf(os.name == 'nt', "Windows supplies the size when the mapping is created")
+    def test_attaching_to_an_unsized_segment(self):
+        """Attach to a segment that exists but has no size yet, deterministically.
+
+        That is exactly the state a creator leaves behind between its shm_open and its ftruncate.
+        Racing for the window is a coin flip, so the window is built here instead: create the
+        segment, hand it to get_memory, and only give it a size once a waiter should already be
+        blocked on it.
+
+        Unfixed, get_memory attaches immediately, fails to mmap the empty segment, and CPython
+        unlinks it before re-raising -- so this fails on the exception and, had it not, on the
+        segment having been destroyed.
+        """
+        import _posixshmem, threading
+
+        name = 'ultra_unsized_segment'
+        try:
+            _posixshmem.shm_unlink('/' + name)
+        except FileNotFoundError:
+            pass
+
+        fd = _posixshmem.shm_open('/' + name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        timer = threading.Timer(0.3, lambda: os.ftruncate(fd, 1000))
+        memory = None
+        try:
+            timer.start()
+            start = time.monotonic()
+            memory = UltraDict.get_memory(create=False, name=name)
+            elapsed = time.monotonic() - start
+
+            self.assertGreaterEqual(elapsed, 0.2, "attached before the segment had a size")
+            self.assertGreaterEqual(memory.size, 1000)
+
+            # The creator's segment must still be there: a failed attach unlinks it, which is what
+            # silently splits one dict into two under the same name.
+            probe = _posixshmem.shm_open('/' + name, os.O_RDONLY, 0o600)
+            os.close(probe)
+        finally:
+            timer.cancel()
+            if memory is not None:
+                memory.close()
+            os.close(fd)
+            try:
+                _posixshmem.shm_unlink('/' + name)
+            except FileNotFoundError:
+                pass
+
+    def test_concurrent_boot(self):
+        """Processes starting together on one name must not see a half-built dict."""
+        filename = "tests/concurrent_boot.py"
+        ret = self.exec(filename)
+        self.assertReturnCode(ret)
+        self.assertEqual(ret.stdout.splitlines()[-1], b"Failed attempts: 0 == 0", self.exec_show_output(ret))
 
 
 if __name__ == '__main__':
