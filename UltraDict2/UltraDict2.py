@@ -663,6 +663,7 @@ class UltraDict(collections.UserDict, dict):
         if create and size <= 0:
             raise ValueError(f"Cannot create memory with size={size}")
 
+        deadline = time.monotonic() + READY_TIMEOUT
         while True:
             if name:
                 # First try to attach to existing memory
@@ -677,6 +678,17 @@ class UltraDict(collections.UserDict, dict):
                     return memory
                 except FileNotFoundError:
                     pass
+                except ValueError:
+                    # POSIX publishes the name in shm_open but only gives it a size in the
+                    # ftruncate that follows, so a process attaching in between finds a segment it
+                    # cannot mmap ("cannot mmap an empty file"). Wait for the creator to size it.
+                    # Windows has no such window; it takes the size when the mapping is created.
+                    if time.monotonic() >= deadline:
+                        raise Exceptions.CannotAttachSharedMemory(
+                            f"Timed out after {READY_TIMEOUT}s waiting for '{name}' to be given a size"
+                        ) from None
+                    time.sleep(READY_INTERVAL)
+                    continue
 
             # No existing memory found
             if create or create is None:
