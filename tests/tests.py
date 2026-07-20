@@ -144,20 +144,25 @@ class UltraDictTests(unittest.TestCase):
         import psutil
 
         p = psutil.Process()
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "file handle count before before tests should be 0")
+        # Counted as a delta, not an absolute: handles the process already holds are none
+        # of this test's business. On the CI runner under 3.14 a read handle on the
+        # interpreter binary is open before this test starts, which an absolute count
+        # reports as a leak.
+        baseline = len(p.open_files())
+
+        def assert_open_files(expected, what):
+            files = p.open_files()
+            self.assertEqual(len(files) - baseline, expected, f"{what} should be {expected}, open files are {files}")
+
+        assert_open_files(0, "file handle count before before tests")
         ultra = UltraDict(nested={1: 1})
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 4, "file handle count with one simple UltraDict should be 4")
+        assert_open_files(4, "file handle count with one simple UltraDict")
         del ultra
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "file handle count after deleting the UltraDict should be 0 again")
+        assert_open_files(0, "file handle count after deleting the UltraDict")
         ultra = UltraDict(nested={1: 1}, recurse=True)
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 12, "nested file handle count should be 12")
+        assert_open_files(12, "nested file handle count")
         del ultra
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "nested file handle count after deleting UltraDict should be 0 again")
+        assert_open_files(0, "nested file handle count after deleting UltraDict")
 
     def test_example_simple(self):
         filename = "examples/simple.py"
