@@ -31,6 +31,6 @@ jobs:
         run: python -m unittest
 
   # same job the release runs: build and test the compiled wheels on every
-  # supported platform, including the QEMU-emulated linux arches
+  # supported platform
   build-wheels:
     uses: ./.github/workflows/_reusable-build-wheels.yml
