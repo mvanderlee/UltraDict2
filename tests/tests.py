@@ -240,6 +240,78 @@ class UltraDictTests(unittest.TestCase):
             timer.join()
         self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
 
+    def _sized_probe(self, path):
+        """Stub shm_open with a real fd on `path`, so fstat/close behave like the real thing."""
+        import UltraDict2.UltraDict2 as ud
+
+        class FakeShm:
+            @staticmethod
+            def shm_open(name, flags, mode=0o600):
+                return os.open(path, os.O_RDONLY)
+
+        return ud, FakeShm
+
+    def test_wait_until_sized_waits_for_the_creator(self):
+        """A segment with no size yet is waited on, not attached to."""
+        import tempfile, threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'segment')
+            open(path, 'wb').close()  # exists, size 0 -- as after shm_open but before ftruncate
+            ud, fake = self._sized_probe(path)
+
+            def give_it_a_size():
+                with open(path, 'wb') as f:
+                    f.write(b'x' * 1000)
+
+            timer = threading.Timer(0.1, give_it_a_size)
+            original = ud._posixshmem
+            ud._posixshmem = fake
+            try:
+                timer.start()
+                start = time.monotonic()
+                ud.UltraDict.wait_until_sized('segment', time.monotonic() + 10)
+                elapsed = time.monotonic() - start
+            finally:
+                ud._posixshmem = original
+                timer.cancel()
+
+            self.assertGreaterEqual(elapsed, 0.05, "returned before the segment had a size")
+            self.assertLess(elapsed, 9, "did not notice the segment being sized")
+
+    def test_wait_until_sized_times_out_on_a_dead_creator(self):
+        """A creator that died before ftruncate never sizes it, so we give up rather than hang."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'segment')
+            open(path, 'wb').close()
+            ud, fake = self._sized_probe(path)
+
+            original = ud._posixshmem
+            ud._posixshmem = fake
+            try:
+                with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
+                    ud.UltraDict.wait_until_sized('segment', time.monotonic() + 0.2)
+            finally:
+                ud._posixshmem = original
+
+    def test_wait_until_sized_ignores_a_missing_segment(self):
+        """Nothing to wait for; the caller goes on to create it."""
+        import UltraDict2.UltraDict2 as ud
+
+        class Missing:
+            @staticmethod
+            def shm_open(name, flags, mode=0o600):
+                raise FileNotFoundError(name)
+
+        original = ud._posixshmem
+        ud._posixshmem = Missing
+        try:
+            ud.UltraDict.wait_until_sized('nope', time.monotonic() + 10)
+        finally:
+            ud._posixshmem = original
+
     def test_concurrent_boot(self):
         """Processes starting together on one name must not see a half-built dict."""
         filename = "tests/concurrent_boot.py"
