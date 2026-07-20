@@ -3,12 +3,13 @@
 #
 # Two dicts `ultra` and `other` are linked together using shared memory.
 
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from UltraDict2 import UltraDict
 
-import multiprocessing, time
+from UltraDict2 import UltraDict
 
 count = 100_000
 

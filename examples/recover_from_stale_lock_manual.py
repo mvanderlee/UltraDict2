@@ -5,12 +5,17 @@
 # A strategy for recovery with a timeout is demonstrated.
 #
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from UltraDict2 import UltraDict
+import multiprocessing
+import signal
+import subprocess
+import time
 
-import multiprocessing, time, signal, subprocess
+from UltraDict2 import UltraDict
 
 # For better visibility in console, only count to 100
 count = 100

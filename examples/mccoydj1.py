@@ -1,14 +1,17 @@
 # In this example two processes will write to an UltraDict
 # with maximum speed.
 
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, '../..')
 
 import multiprocessing
-from UltraDict2 import UltraDict
 import random
 import string
+
+from UltraDict2 import UltraDict
 
 name='ultra6'
 
@@ -40,7 +43,6 @@ if __name__ == '__main__':
     p2 = multiprocessing.Process(target=P2)
     p2.start()
 
-    import time
     while True:
         print(ultra)
         #x = str(ultra)

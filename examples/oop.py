@@ -2,10 +2,13 @@
 # Class example linking attributes of two instances
 #
 
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from UltraDict2 import UltraDict
+
 
 class MyClass():
     link_name = 'shared-class'

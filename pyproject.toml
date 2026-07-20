@@ -16,6 +16,22 @@ dependencies    = ["atomics2==1.1.0", "psutil"]
 [project.urls]
 Homepage        = "https://github.com/mvanderlee/UltraDict2"
 
+[dependency-groups]
+dev             = ["pre-commit", "ruff"]
+
+[tool.ruff]
+line-length     = 130
+
+[tool.ruff.format]
+quote-style     = "preserve"
+
+[tool.ruff.lint]
+extend-select   = ["I"]
+
+[tool.ruff.lint.per-file-ignores]
+# bindings keep the shared memory alive for the duration of the test
+"tests/*"       = ["F841"]
+
 [tool.setuptools]
 packages        = ["UltraDict2"]
 zip-safe        = false

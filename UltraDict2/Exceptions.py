@@ -20,6 +20,7 @@
 
 import time
 
+
 class CannotAttachSharedMemory(Exception):
     pass
 

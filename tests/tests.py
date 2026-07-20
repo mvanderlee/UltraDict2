@@ -1,6 +1,9 @@
-import unittest
+import os
 import subprocess
-import os, sys, threading, time
+import sys
+import threading
+import time
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
@@ -20,7 +23,7 @@ class UltraDictTests(unittest.TestCase):
         ret = subprocess.run([sys.executable, filepath],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         #print(ret.stdout.decode())
-        ret.stdout = ret.stdout.replace(b'\r\n', b'\n');
+        ret.stdout = ret.stdout.replace(b'\r\n', b'\n')
         self.assertEqual(ret.returncode, 0,
                 f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
                 f"{self.exec_show_output(ret)}")
@@ -253,7 +256,8 @@ class UltraDictTests(unittest.TestCase):
 
     def test_wait_until_sized_waits_for_the_creator(self):
         """A segment with no size yet is waited on, not attached to."""
-        import tempfile, threading
+        import tempfile
+        import threading
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, 'segment')
@@ -330,7 +334,8 @@ class UltraDictTests(unittest.TestCase):
         unlinks it before re-raising -- so this fails on the exception and, had it not, on the
         segment having been destroyed.
         """
-        import _posixshmem, threading
+        import _posixshmem
+        import threading
 
         name = 'ultra_unsized_segment'
         try:

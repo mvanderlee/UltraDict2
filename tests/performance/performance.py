@@ -1,4 +1,7 @@
-import sys, os, time, multiprocessing
+import multiprocessing
+import sys
+import time
+
 sys.path.insert(0, '../../..')
 
 count = 1_000_000
@@ -14,7 +17,7 @@ def print_perf(name, operation, t_start, t_end, iterations):
     speed = round(iterations / t)
     print(f"{name} ({operation}) = {speed:,d} ops per second")
 
-    if not operation in ranking:
+    if operation not in ranking:
         ranking[operation] = {}
 
     ranking[operation][name] = speed
@@ -117,7 +120,7 @@ def main():
     t_end = time.perf_counter()
     print_perf('UltraDict', 'reads', t_start, t_end, count)
 
-    ultra = UltraDict.UltraDict(shared_lock=True)
+    ultra = UltraDict2.UltraDict(shared_lock=True)
 
     # UltraDict with shared_lock=True (writes)
     t_start = time.perf_counter()

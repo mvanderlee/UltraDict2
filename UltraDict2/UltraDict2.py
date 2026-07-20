@@ -569,9 +569,9 @@ class UltraDict(collections.UserDict, dict):
         if self.recurse:
             # Must be either the name of an UltraDict as a string or an UltraDict instance
             if recurse_register is not None:
-                if type(recurse_register) == str:
+                if type(recurse_register) is str:
                     self.recurse_register = UltraDict(name=recurse_register)
-                elif type(recurse_register) == UltraDict:
+                elif type(recurse_register) is UltraDict:
                     self.recurse_register = recurse_register
                 else:
                     raise Exception("Bad type for recurse_register")
@@ -1029,9 +1029,9 @@ class UltraDict(collections.UserDict, dict):
 
             if self.recurse:
 
-                assert type(self.recurse_register) == UltraDict, "recurse_register must be an UltraDict instance"
+                assert type(self.recurse_register) is UltraDict, "recurse_register must be an UltraDict instance"
 
-                if type(item) == dict:
+                if type(item) is dict:
                     # TODO: Use parent's buffer with a namespace prefix?
                     item = UltraDict(item,
                                      recurse          = True,
@@ -1204,7 +1204,7 @@ class UltraDict(collections.UserDict, dict):
 
     def unlink_recursed(self):
         #log.debug("Unlink recursed id={}", hex(id(self)))
-        if not self.recurse or (type(self.recurse_register) != UltraDict):
+        if not self.recurse or (type(self.recurse_register) is not UltraDict):
             raise Exception("Cannot unlink recursed for non-recurse UltraDict")
 
         ignore_errors = sys.platform == 'win32'
