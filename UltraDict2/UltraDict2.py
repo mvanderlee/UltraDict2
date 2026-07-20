@@ -663,36 +663,45 @@ class UltraDict(collections.UserDict, dict):
 
     @staticmethod
     def wait_until_sized(name, deadline):
-        """ Block while `name` exists but has not been given a size yet.
+        """ Report whether `name` can be attached to, waiting while it is still being set up.
 
-            POSIX publishes a shared memory name in shm_open but only gives it a size in the
-            ftruncate that follows. Attaching in that window fails to mmap the empty segment, and
-            CPython unlinks the segment before re-raising -- destroying the creator's memory and
-            leaving the next process to create a second, unrelated segment under the same name.
+            Returns True once the segment exists and has a size, False if it does not exist, in
+            which case the caller must create it instead of attaching. Answering that question is
+            the whole point: attaching to a segment that exists but has no size yet fails to mmap,
+            and CPython unlinks the segment before re-raising -- destroying the creator's memory
+            and leaving the next process to create a second, unrelated segment under the same name.
 
-            So the size is checked here, on a probe fd of our own, and the real attach only happens
-            once it is safe. A size only ever goes from zero to its final value, so there is
-            nothing left to race against afterwards. Windows has no such window: the size is
-            supplied when the mapping is created.
+            POSIX publishes a name in shm_open but only gives it a size in the ftruncate that
+            follows, so that window is real, and 'it did not exist a moment ago' is not a safe
+            reason to try attaching: the creator may have got there in between. A size only ever
+            goes from zero to its final value, so once seen there is nothing left to race against.
+
+            Windows has no such window, as the size is supplied when the mapping is created, so
+            there we always report True and let SharedMemory decide.
         """
         if _posixshmem is None:
-            return
+            return True
 
-        try:
-            fd = _posixshmem.shm_open('/' + name, os.O_RDONLY, mode=0o600)
-        except (FileNotFoundError, PermissionError, ValueError):
-            # Nothing to wait for; let the caller create it or report the failure
-            return
+        while True:
+            try:
+                fd = _posixshmem.shm_open('/' + name, os.O_RDONLY, mode=0o600)
+            except FileNotFoundError:
+                return False
+            except (PermissionError, ValueError):
+                # Cannot inspect it; let SharedMemory report whatever the real problem is
+                return True
 
-        try:
-            while os.fstat(fd).st_size == 0:
-                if time.monotonic() >= deadline:
-                    raise Exceptions.CannotAttachSharedMemory(
-                        f"Timed out waiting for '{name}' to be given a size by the process creating it"
-                    )
-                time.sleep(READY_INTERVAL)
-        finally:
-            os.close(fd)
+            try:
+                if os.fstat(fd).st_size:
+                    return True
+            finally:
+                os.close(fd)
+
+            if time.monotonic() >= deadline:
+                raise Exceptions.CannotAttachSharedMemory(
+                    f"Timed out waiting for '{name}' to be given a size by the process creating it"
+                )
+            time.sleep(READY_INTERVAL)
 
     @staticmethod
     def get_memory(*, create=True, name=None, size=0):
@@ -706,10 +715,9 @@ class UltraDict(collections.UserDict, dict):
 
         deadline = time.monotonic() + READY_TIMEOUT
         while True:
-            if name:
-                UltraDict.wait_until_sized(name, deadline)
-
-                # First try to attach to existing memory
+            # Only attach once it is known to be attachable. Trying anyway when it does not exist
+            # yet races the creator into the window between its shm_open and its ftruncate.
+            if name and UltraDict.wait_until_sized(name, deadline):
                 try:
                     memory = multiprocessing.shared_memory.SharedMemory(name=name, **shm_track_kwargs)
                     #log.debug('Attached shared memory: ', memory.name)
@@ -720,6 +728,7 @@ class UltraDict(collections.UserDict, dict):
 
                     return memory
                 except FileNotFoundError:
+                    # Unlinked between the check and the attach; fall through and create it
                     pass
 
             # No existing memory found

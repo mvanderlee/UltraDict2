@@ -9,6 +9,11 @@
 # A Barrier is essential: initialisation takes microseconds, so processes have to be released at
 # the same instant to land in the window at all.
 #
+# Even then, landing in it is a matter of luck: with the fix reverted this caught the bug in only
+# about three runs out of four, which is how one broken commit passed on some Python versions and
+# failed on others. So this is an end to end smoke test, not the regression guard --
+# test_attaching_to_an_unsized_segment builds the window directly and catches it every time.
+#
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -270,12 +270,13 @@ class UltraDictTests(unittest.TestCase):
             try:
                 timer.start()
                 start = time.monotonic()
-                ud.UltraDict.wait_until_sized('segment', time.monotonic() + 10)
+                ready = ud.UltraDict.wait_until_sized('segment', time.monotonic() + 10)
                 elapsed = time.monotonic() - start
             finally:
                 ud._posixshmem = original
                 timer.cancel()
 
+            self.assertTrue(ready, "a sized segment must be reported as attachable")
             self.assertGreaterEqual(elapsed, 0.05, "returned before the segment had a size")
             self.assertLess(elapsed, 9, "did not notice the segment being sized")
 
@@ -296,8 +297,12 @@ class UltraDictTests(unittest.TestCase):
             finally:
                 ud._posixshmem = original
 
-    def test_wait_until_sized_ignores_a_missing_segment(self):
-        """Nothing to wait for; the caller goes on to create it."""
+    def test_wait_until_sized_reports_a_missing_segment_as_not_attachable(self):
+        """A segment that does not exist must not be attached to.
+
+        Reporting it as attachable is what let a process race the creator into the window between
+        its shm_open and its ftruncate, which is the failure this whole check exists to prevent.
+        """
         import UltraDict2.UltraDict2 as ud
 
         class Missing:
@@ -308,9 +313,56 @@ class UltraDictTests(unittest.TestCase):
         original = ud._posixshmem
         ud._posixshmem = Missing
         try:
-            ud.UltraDict.wait_until_sized('nope', time.monotonic() + 10)
+            self.assertFalse(ud.UltraDict.wait_until_sized('nope', time.monotonic() + 10))
         finally:
             ud._posixshmem = original
+
+    @unittest.skipIf(os.name == 'nt', "Windows supplies the size when the mapping is created")
+    def test_attaching_to_an_unsized_segment(self):
+        """Attach to a segment that exists but has no size yet, deterministically.
+
+        That is exactly the state a creator leaves behind between its shm_open and its ftruncate.
+        Racing for the window is a coin flip, so the window is built here instead: create the
+        segment, hand it to get_memory, and only give it a size once a waiter should already be
+        blocked on it.
+
+        Unfixed, get_memory attaches immediately, fails to mmap the empty segment, and CPython
+        unlinks it before re-raising -- so this fails on the exception and, had it not, on the
+        segment having been destroyed.
+        """
+        import _posixshmem, threading
+
+        name = 'ultra_unsized_segment'
+        try:
+            _posixshmem.shm_unlink('/' + name)
+        except FileNotFoundError:
+            pass
+
+        fd = _posixshmem.shm_open('/' + name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        timer = threading.Timer(0.3, lambda: os.ftruncate(fd, 1000))
+        memory = None
+        try:
+            timer.start()
+            start = time.monotonic()
+            memory = UltraDict.get_memory(create=False, name=name)
+            elapsed = time.monotonic() - start
+
+            self.assertGreaterEqual(elapsed, 0.2, "attached before the segment had a size")
+            self.assertGreaterEqual(memory.size, 1000)
+
+            # The creator's segment must still be there: a failed attach unlinks it, which is what
+            # silently splits one dict into two under the same name.
+            probe = _posixshmem.shm_open('/' + name, os.O_RDONLY, 0o600)
+            os.close(probe)
+        finally:
+            timer.cancel()
+            if memory is not None:
+                memory.close()
+            os.close(fd)
+            try:
+                _posixshmem.shm_unlink('/' + name)
+            except FileNotFoundError:
+                pass
 
     def test_concurrent_boot(self):
         """Processes starting together on one name must not see a half-built dict."""
