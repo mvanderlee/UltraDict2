@@ -45,6 +45,11 @@ from . import Exceptions
 # bound the wait: a live owner is waited on for as long as it keeps working.
 DEFAULT_LOCK_TIMEOUT = 5.0
 
+# How long a process attaching to a half-built dict waits for its creator to finish. Creation takes
+# microseconds, so this only has to outlast a scheduling hiccup.
+READY_TIMEOUT = 10.0
+READY_INTERVAL = 0.0005
+
 
 def remove_shm_from_resource_tracker():
     """
@@ -413,6 +418,7 @@ class UltraDict(collections.UserDict, dict):
         'full_dump_counter_remote', \
         'full_dump_static_size_remote', \
         'shared_lock_remote', \
+        'ready_remote', \
         'recurse', 'recurse_remote', 'recurse_register', \
         'full_dump_memory_name_remote', \
         'lock_time_remote', \
@@ -465,6 +471,13 @@ class UltraDict(collections.UserDict, dict):
 
         self.init_remotes()
 
+        # Creating the control memory publishes it, so another process can attach to a dict that is
+        # still being built: its metadata is zeroed and its buffer does not exist yet. Wait for the
+        # creator to signal it is done before reading any of that.
+        created_by_us = hasattr(self.control, 'created_by_ultra')
+        if not created_by_us:
+            self.wait_until_ready()
+
         self.serializer = serializer
 
         # Actual stream buffer that contains marshalled data of changes to the dict
@@ -478,7 +491,7 @@ class UltraDict(collections.UserDict, dict):
         # Warning: Issues on Windows when the process ends that has created the full dump memory
         self.full_dump_size = None
 
-        if hasattr(self.control, 'created_by_ultra'):
+        if created_by_us:
 
             if auto_unlink is None:
                 self.auto_unlink = True
@@ -497,6 +510,9 @@ class UltraDict(collections.UserDict, dict):
 
                 self.full_dump_memory = self.get_memory(create=True, name=self.name + '_full', size=full_dump_size)
                 self.full_dump_memory_name_remote[:] = self.full_dump_memory.name.encode('utf-8').ljust(255)
+
+            # Published last: everything an attaching process reads is now in place.
+            self.ready_remote[0:1] = b'1'
 
         # We just attached to the existing control
         else:
@@ -590,6 +606,25 @@ class UltraDict(collections.UserDict, dict):
         #    del self.recurse_register
 
 
+    def wait_until_ready(self, timeout=READY_TIMEOUT, interval=READY_INTERVAL):
+        """ Block until the process that created this dict has finished initialising it.
+
+            Shared memory is published by the act of creating it, so a dict can be attached to
+            while its creator is still filling in the control block and creating the stream
+            buffer. Reading it before then sees zeroed metadata, which looks exactly like a dict
+            that was created with different parameters.
+
+            A creator that died mid-initialisation never sets the flag, so we time out rather than
+            attach to a dict that will never be complete.
+        """
+        deadline = time.monotonic() + timeout
+        while self.ready_remote[0:1] != b'1':
+            if time.monotonic() >= deadline:
+                raise Exceptions.CannotAttachSharedMemory(
+                    f"Timed out after {timeout}s waiting for the creator of '{self.name}' to finish initialising it"
+                )
+            time.sleep(interval)
+
     def init_remotes(self):
         # Memoryviews to the right buffer position in self.control
         self.update_stream_position_remote = self.control.buf[ 0:  4]
@@ -601,6 +636,7 @@ class UltraDict(collections.UserDict, dict):
         self.recurse_remote                = self.control.buf[19: 20]
         self.full_dump_memory_name_remote  = self.control.buf[20:275]
         self.lock_time_remote              = self.control.buf[275:283]
+        self.ready_remote                  = self.control.buf[283:284]
 
     def del_remotes(self):
         """

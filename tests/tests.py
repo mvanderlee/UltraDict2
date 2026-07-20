@@ -238,6 +238,13 @@ class UltraDictTests(unittest.TestCase):
             timer.join()
         self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
 
+    def test_concurrent_boot(self):
+        """Processes starting together on one name must not see a half-built dict."""
+        filename = "tests/concurrent_boot.py"
+        ret = self.exec(filename)
+        self.assertReturnCode(ret)
+        self.assertEqual(ret.stdout.splitlines()[-1], b"Failed attempts: 0 == 0", self.exec_show_output(ret))
+
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
