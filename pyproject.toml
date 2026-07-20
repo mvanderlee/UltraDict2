@@ -1,6 +1,24 @@
 [build-system]
-requires        = ["setuptools>=64", "setuptools-scm>=8", "wheel", "cython"]
+requires        = ["setuptools>=77", "setuptools-scm>=8", "wheel", "cython"]
 build-backend   = "setuptools.build_meta"
+
+[project]
+name            = "UltraDict2"
+description     = "Sychronized, streaming dictionary that uses shared memory as a backend"
+readme          = "readme.md"
+requires-python = ">=3.11"
+license         = "Apache-2.0"
+license-files   = ["LICENSE"]
+authors         = [{ name = "Ronny Rentner", email = "ultradict.code@ronny-rentner.de" }]
+dynamic         = ["version"]
+dependencies    = ["atomics2==1.1.0", "psutil"]
+
+[project.urls]
+Homepage        = "https://github.com/mvanderlee/UltraDict2"
+
+[tool.setuptools]
+packages        = ["UltraDict2"]
+zip-safe        = false
 
 # version comes from the git tag (e.g. tag v0.0.9 -> version 0.0.9);
 # untagged builds get a dev version derived from the last reachable tag

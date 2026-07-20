@@ -19,14 +19,12 @@ jobs:
         with:
           # full history and tags so setuptools-scm can derive the version
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v8.3.2
         with:
           python-version: '3.12'
 
       - name: Build sdist
-        run: |
-          python -m pip install build
-          python -m build --sdist
+        run: uv build --sdist
 
       - uses: actions/upload-artifact@v7
         with:
