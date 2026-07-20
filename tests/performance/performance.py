@@ -12,6 +12,7 @@ count = 100_000
 
 ranking = {}
 
+
 def print_perf(name, operation, t_start, t_end, iterations):
     t = t_end - t_start
     speed = round(iterations / t)
@@ -22,6 +23,7 @@ def print_perf(name, operation, t_start, t_end, iterations):
 
     ranking[operation][name] = speed
 
+
 def print_ranking():
     print('\nRanking:')
     for operation_name, operation in ranking.items():
@@ -31,19 +33,20 @@ def print_ranking():
             if not top:
                 top = value
 
-            multiple = round(top/value, 2)
+            multiple = round(top / value, 2)
             print(f'    {name} = {value:,d} (factor {multiple})')
+
 
 def main():
 
     print(f"\nTesting Performance with {count!r} operations each\n")
-
 
     ##
     ## Redis
     ##
 
     import redis
+
     r = redis.Redis()
 
     # Redis (writes)
@@ -104,6 +107,7 @@ def main():
     ##
 
     import UltraDict2
+
     ultra = UltraDict2.UltraDict()
 
     # UltraDict (writes)
@@ -139,6 +143,6 @@ def main():
 
     print_ranking()
 
+
 if __name__ == '__main__':
     main()
-

@@ -21,7 +21,7 @@ from UltraDict2 import UltraDict
 
 # For better visibility in console, only count to 100
 count = 100
-#count = 100_000
+# count = 100_000
 
 number_of_processes = 5
 
@@ -34,6 +34,7 @@ simulate_crash_at_target_count = 10
 # should be allowed to steal the lock (afterchecking that the blocking
 # process is actually dead).
 stale_lock_timeout = 5.0
+
 
 def possibly_simulate_crash(d):
     """
@@ -48,7 +49,7 @@ def possibly_simulate_crash(d):
         if hasattr(signal, 'SIGKILL'):
             os.kill(process.pid, signal.SIGKILL)
         elif sys.platform == 'win32':
-            subprocess.call(['taskkill', '/F', '/PID',  str(process.pid)])
+            subprocess.call(['taskkill', '/F', '/PID', str(process.pid)])
         else:
             raise Exception("Don't know how to kill process to simulate a crash")
 
@@ -59,6 +60,7 @@ def possibly_simulate_crash(d):
         print("Killed. (This message should never print!)")
 
         raise Exception("We should never reach this point, because the process should have been killed before.")
+
 
 def run(name, target):
     d = UltraDict(name=name)
@@ -83,8 +85,8 @@ def run(name, target):
 
             possibly_simulate_crash(d)
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     ultra = UltraDict(buffer_size=10_000, shared_lock=True)
     ultra['counter'] = 0
 
@@ -102,8 +104,8 @@ if __name__ == '__main__':
     for p in processes:
         p.join()
 
-    #print(ultra)
-    #ultra.print_status()
-    #ultra.lock.print_status()
+    # print(ultra)
+    # ultra.print_status()
+    # ultra.lock.print_status()
 
     print("Counter:", ultra['counter'], '==', count)

@@ -14,19 +14,21 @@ if hasattr(UltraDict.log, 'disable'):
 else:
     UltraDict.log.set_level(UltraDict.log.Levels.error)
 
-class UltraDictTests(unittest.TestCase):
 
+class UltraDictTests(unittest.TestCase):
     def setUp(self):
         pass
 
     def exec(self, filepath):
-        ret = subprocess.run([sys.executable, filepath],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        #print(ret.stdout.decode())
+        ret = subprocess.run([sys.executable, filepath], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # print(ret.stdout.decode())
         ret.stdout = ret.stdout.replace(b'\r\n', b'\n')
-        self.assertEqual(ret.returncode, 0,
-                f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
-                f"{self.exec_show_output(ret)}")
+        self.assertEqual(
+            ret.returncode,
+            0,
+            f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
+            f"{self.exec_show_output(ret)}",
+        )
         return ret
 
     def exec_show_output(self, ret):
@@ -40,10 +42,10 @@ class UltraDictTests(unittest.TestCase):
         other = UltraDict(name=ultra.name)
 
         count = 100
-        for i in range(count//2):
+        for i in range(count // 2):
             ultra[i] = i
 
-        for i in range(count//2, count):
+        for i in range(count // 2, count):
             other[i] = i
 
         self.assertEqual(len(ultra), len(other))
@@ -66,7 +68,7 @@ class UltraDictTests(unittest.TestCase):
         self.assertEqual(len(other.data['huge']), length)
 
     def test_parameter_passing(self):
-        ultra = UltraDict(shared_lock=True, buffer_size=4096*8, full_dump_size=4096*8)
+        ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`
         other = UltraDict(name=ultra.name)
 
@@ -94,8 +96,9 @@ class UltraDictTests(unittest.TestCase):
     def test_delete(self):
         import random
         import string
+
         letters = string.ascii_lowercase
-        rand_str =   ''.join(random.choice(letters) for i in range(1000))
+        rand_str = ''.join(random.choice(letters) for i in range(1000))
         my_dict = UltraDict(buffer_size=10_000_000)
         for i in range(100_000):
             my_dict[i] = rand_str
@@ -130,7 +133,7 @@ class UltraDictTests(unittest.TestCase):
         pass
 
     # Turns out MacOS can only do 24 characters in total
-    #def test_longest_name(self):
+    # def test_longest_name(self):
     #    for i in range(5, 50):
     #        print('Loop ', i)
     #        ultra = UltraDict(name='x' * i)
@@ -139,16 +142,17 @@ class UltraDictTests(unittest.TestCase):
     def test_cleanup(self):
         # TODO
         import psutil
+
         p = psutil.Process()
         file_count = len(p.open_files())
         self.assertEqual(file_count, 0, "file handle count before before tests should be 0")
-        ultra = UltraDict(nested={ 1: 1})
+        ultra = UltraDict(nested={1: 1})
         file_count = len(p.open_files())
         self.assertEqual(file_count, 4, "file handle count with one simple UltraDict should be 4")
         del ultra
         file_count = len(p.open_files())
         self.assertEqual(file_count, 0, "file handle count after deleting the UltraDict should be 0 again")
-        ultra = UltraDict(nested={ 1: 1}, recurse=True)
+        ultra = UltraDict(nested={1: 1}, recurse=True)
         file_count = len(p.open_files())
         self.assertEqual(file_count, 12, "nested file handle count should be 12")
         del ultra
@@ -171,7 +175,11 @@ class UltraDictTests(unittest.TestCase):
         filename = "examples/nested.py"
         ret = self.exec(filename)
         self.assertReturnCode(ret)
-        self.assertEqual(ret.stdout.splitlines()[-1], b"{'nested': {'deeper': {0: 2}}}  ==  {'nested': {'deeper': {0: 2}}}", self.exec_show_output(ret))
+        self.assertEqual(
+            ret.stdout.splitlines()[-1],
+            b"{'nested': {'deeper': {0: 2}}}  ==  {'nested': {'deeper': {0: 2}}}",
+            self.exec_show_output(ret),
+        )
 
     def test_example_recover_from_stale_lock(self):
         filename = "examples/recover_from_stale_lock.py"

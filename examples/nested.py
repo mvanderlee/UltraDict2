@@ -13,13 +13,12 @@ sys.path.insert(0, '../..')
 from UltraDict2 import UltraDict
 
 if __name__ == '__main__':
-
     # No name provided, create a new dict with random name
     ultra = UltraDict(name="my_name", recurse=True)
     # Connect `other` dict to `ultra` dict via `name`
     other = UltraDict(name=ultra.name)
 
-    ultra['nested'] = { 'deeper': { 0: 1 } }
+    ultra['nested'] = {'deeper': {0: 1}}
 
     other['nested']['deeper'][0] += 1
 

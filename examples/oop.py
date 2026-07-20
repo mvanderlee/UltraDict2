@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
 
 
-class MyClass():
+class MyClass:
     link_name = 'shared-class'
 
     def __init__(self):
@@ -20,10 +20,10 @@ class MyClass():
     def x(self):
         return self._x
 
-    def __getattr__ (self, name):
+    def __getattr__(self, name):
         return self.__dict__[name]
 
-    def __setattr__ (self, name, value):
+    def __setattr__(self, name, value):
         self.__dict__[name] = value
 
 
