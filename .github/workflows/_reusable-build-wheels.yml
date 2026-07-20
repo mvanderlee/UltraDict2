@@ -34,8 +34,8 @@ jobs:
             arch: universal2
 
           # linux entries are split per libc so a manylinux failure doesn't
-          # mask a musllinux one (and vice versa). i686 and aarch64 run on
-          # native runners, so no QEMU here; see build_wheels_emulated.
+          # mask a musllinux one (and vice versa). every arch here has a
+          # native runner, so no QEMU anywhere in this workflow.
           - name: "linux-i386-manylinux"
             os: ubuntu-latest
             arch: i686
@@ -89,43 +89,4 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: artifact-${{ matrix.config.name }}
-          path: ./wheelhouse/*.whl
-
-  # QEMU-emulated arches only. Split one job per interpreter so the ~5min
-  # per-CPython emulation cost runs in parallel instead of serially.
-  build_wheels_emulated:
-    name: Build wheels on linux-${{ matrix.arch }}-${{ matrix.libc }} ${{ matrix.python }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [ppc64le, s390x]
-        libc: [manylinux, musllinux]
-        python: [cp311, cp312, cp313, cp314]
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # full history and tags so setuptools-scm can derive the version
-          fetch-depth: 0
-      - uses: actions/setup-python@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: ${{ matrix.arch }}
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v4.1.0
-        env:
-          CIBW_BUILD: ${{ matrix.python }}-${{ matrix.libc }}*
-          CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_TEST_COMMAND: python -c "import UltraDict2" && cd {project} && python -m unittest
-          # cffi (via atomics2) lacks prebuilt wheels on some arch/python
-          # combos; its source build needs libffi headers
-          CIBW_BEFORE_TEST_LINUX: yum -y install libffi-devel || apk add --no-cache libffi-dev
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: artifact-linux-${{ matrix.arch }}-${{ matrix.libc }}-${{ matrix.python }}
           path: ./wheelhouse/*.whl
