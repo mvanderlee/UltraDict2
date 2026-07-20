@@ -18,6 +18,7 @@
 # limitations under the License.
 #
 
+from .Metrics import Metrics
 from .UltraDict2 import DEFAULT_LOCK_TIMEOUT, UltraDict
 
-__all__ = ["DEFAULT_LOCK_TIMEOUT", "UltraDict"]
+__all__ = ["DEFAULT_LOCK_TIMEOUT", "Metrics", "UltraDict"]
