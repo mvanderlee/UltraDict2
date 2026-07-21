@@ -1,5 +1,10 @@
 # UltraDict2
 
+[![PyPI Package](https://img.shields.io/pypi/v/ultradict2.svg)](https://pypi.org/project/UltraDict2)
+[![Tests](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml)
+[![Python 3.11-3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/mvanderlee/UltraDict2.svg)](https://github.com/mvanderlee/UltraDict2/blob/main/LICENSE)
+
 Sychronized, streaming Python dictionary that uses shared memory as a backend
 
 This is a maintained fork of [ronny-rentner/UltraDict](https://github.com/ronny-rentner/UltraDict),
@@ -16,11 +21,6 @@ Features:
 * Tested with Python 3.11 - 3.14 on Linux, Windows and Mac
 * Convenient, no setter or getters necessary
 * Optional recursion for nested dicts
-
-[![PyPI Package](https://img.shields.io/pypi/v/ultradict2.svg)](https://pypi.org/project/UltraDict2)
-[![Tests](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml)
-[![Python 3.11-3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/github/license/mvanderlee/UltraDict2.svg)](https://github.com/mvanderlee/UltraDict2/blob/main/LICENSE)
 
 ## Atomic operations via atomics2
 
@@ -40,6 +40,64 @@ If the buffer is full, `UltraDict` will automatically do a full dump to a new sh
 memory space, reset the streaming buffer and continue to stream further updates. All users
 of the `UltraDict` will automatically load full dumps and continue using
 streaming updates afterwards.
+
+### What lives where
+
+The dict itself is **not** stored in shared memory. Every process keeps its own complete
+copy as an ordinary Python `dict`; shared memory carries the update stream and the
+snapshots used to keep those copies in step.
+
+```mermaid
+flowchart LR
+    subgraph proc1["Process 1 (writer)"]
+        d1["self.data<br/>full local copy"]
+    end
+    subgraph proc2["Process 2"]
+        d2["self.data<br/>full local copy"]
+    end
+    subgraph proc3["Process 3"]
+        d3["self.data<br/>full local copy"]
+    end
+
+    subgraph shm["Shared memory"]
+        control["control<br/>1000 bytes<br/>position + dump counter"]
+        buffer["update buffer<br/>buffer_size<br/>stream of changes"]
+        dump["full dump<br/>snapshot of the whole dict"]
+    end
+
+    d1 -- "append frame" --> buffer
+    d1 -- "snapshot when buffer is full" --> dump
+    buffer -- "replay frames" --> d2
+    buffer -- "replay frames" --> d3
+    dump -- "reload everything" --> d2
+    dump -- "reload everything" --> d3
+    control -.- buffer
+    control -.- dump
+```
+
+Two consequences worth planning for:
+
+- **Reads are local.** A read compares two integers in the control block and then hits the
+  local `dict`. Nothing is deserialized unless something actually changed.
+- **Memory scales with the number of processes.** A 500 MB dict shared by 8 processes costs
+  roughly 8 x 500 MB of RAM plus the shared segments, not 500 MB. Shared memory here is a
+  transport, not a way to store one copy.
+
+### Writing
+
+```mermaid
+flowchart TD
+    w["d[key] = value"] --> ser["serialize the change"]
+    ser --> fits{"does the frame fit<br/>in the update buffer?"}
+    fits -- yes --> append["append frame, advance position"]
+    append --> cheap["cost: size of the change"]
+    fits -- no --> full["serialize the whole dict into a full dump"]
+    full --> reset["publish it, bump the dump counter, reset the buffer"]
+    reset --> pricey["cost: size of the entire dict,<br/>paid again by every reader"]
+```
+
+A write that does not fit is never streamed at all: it reaches other processes only inside
+the snapshot. That is why `buffer_size` matters far more than it looks.
 
 ## Issues
 
@@ -305,6 +363,22 @@ There are 3 cases that can occur when you read from an `UltraDict:
 2. Streaming update: This is usually fast, depending on the size and amount of that data that was changed but not depending on the size of the whole `UltraDict`. Only the data that was actually changed has to be unserialized.
 
 3. Full dump load: This can be slow, depending on the total size of your data. If your `UltraDict` is big it might take long to unserialize it.
+
+```mermaid
+flowchart TD
+    r["d[key]"] --> chk{"dump counter<br/>changed?"}
+    chk -- yes --> load["load the full dump"]
+    load --> c3["case 3: cost is the whole dict"]
+    chk -- no --> pos{"stream position<br/>moved?"}
+    pos -- yes --> replay["replay only the new frames"]
+    replay --> c2["case 2: cost is the changes"]
+    pos -- no --> hit["return from the local copy"]
+    hit --> c1["case 1: two integer comparisons"]
+```
+
+Note that synchronization is pull based and lazy: there is no background thread. A process
+only catches up when it touches the dict, so an idle process pays for everything it missed
+on its next access.
 
 Given the above 3 cases, you need to balance the size of your data and your write patterns with the streaming `buffer_size` of your UltraDict. If the streaming buffer is full, a full dump has to be created. Thus, if your full dumps are expensive due to their size, try to find a good `buffer_size` to avoid creating too many full dumps.
 
