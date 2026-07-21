@@ -20,8 +20,10 @@
 
 import time
 
+
 class CannotAttachSharedMemory(Exception):
     pass
+
 
 class CannotAcquireLock(Exception):
     def __init__(self, *args, blocking_pid=0, timestamp=None, **kwargs):
@@ -29,31 +31,38 @@ class CannotAcquireLock(Exception):
         self.blocking_pid = blocking_pid
         self.timestamp = timestamp or time.monotonic()
 
+
 class CannotAcquireLockTimeout(CannotAcquireLock):
     def __init__(self, *args, time_passed=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.time_passed = time_passed
 
+
 class ParameterMismatch(Exception):
     pass
+
 
 class AlreadyClosed(Exception):
     pass
 
+
 class AlreadyExists(Exception):
     pass
+
 
 class FullDumpMemoryFull(Exception):
     pass
 
-class CorruptedStream(AssertionError):
-    """ Raised when the update stream or a full dump contains invalid data.
 
-        Subclasses AssertionError because the recovery paths catch AssertionError;
-        unlike a plain `assert`, it still fires when running under `python -O`.
+class CorruptedStream(AssertionError):
+    """Raised when the update stream or a full dump contains invalid data.
+
+    Subclasses AssertionError because the recovery paths catch AssertionError;
+    unlike a plain `assert`, it still fires when running under `python -O`.
     """
+
     pass
+
 
 class MissingDependency(Exception):
     pass
-

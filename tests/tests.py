@@ -1,6 +1,10 @@
-import unittest
+import os
 import subprocess
-import os, sys, threading, time
+import sys
+import threading
+import time
+import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
@@ -11,19 +15,21 @@ if hasattr(UltraDict.log, 'disable'):
 else:
     UltraDict.log.set_level(UltraDict.log.Levels.error)
 
-class UltraDictTests(unittest.TestCase):
 
+class UltraDictTests(unittest.TestCase):
     def setUp(self):
         pass
 
     def exec(self, filepath):
-        ret = subprocess.run([sys.executable, filepath],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        #print(ret.stdout.decode())
-        ret.stdout = ret.stdout.replace(b'\r\n', b'\n');
-        self.assertEqual(ret.returncode, 0,
-                f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
-                f"{self.exec_show_output(ret)}")
+        ret = subprocess.run([sys.executable, filepath], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # print(ret.stdout.decode())
+        ret.stdout = ret.stdout.replace(b'\r\n', b'\n')
+        self.assertEqual(
+            ret.returncode,
+            0,
+            f"Running '{filepath}' returned exit code '{ret.returncode}' but expected exit code is '0'"
+            f"{self.exec_show_output(ret)}",
+        )
         return ret
 
     def exec_show_output(self, ret):
@@ -37,10 +43,10 @@ class UltraDictTests(unittest.TestCase):
         other = UltraDict(name=ultra.name)
 
         count = 100
-        for i in range(count//2):
+        for i in range(count // 2):
             ultra[i] = i
 
-        for i in range(count//2, count):
+        for i in range(count // 2, count):
             other[i] = i
 
         self.assertEqual(len(ultra), len(other))
@@ -63,7 +69,7 @@ class UltraDictTests(unittest.TestCase):
         self.assertEqual(len(other.data['huge']), length)
 
     def test_parameter_passing(self):
-        ultra = UltraDict(shared_lock=True, buffer_size=4096*8, full_dump_size=4096*8)
+        ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`
         other = UltraDict(name=ultra.name)
 
@@ -91,8 +97,9 @@ class UltraDictTests(unittest.TestCase):
     def test_delete(self):
         import random
         import string
+
         letters = string.ascii_lowercase
-        rand_str =   ''.join(random.choice(letters) for i in range(1000))
+        rand_str = ''.join(random.choice(letters) for i in range(1000))
         my_dict = UltraDict(buffer_size=10_000_000)
         for i in range(100_000):
             my_dict[i] = rand_str
@@ -127,7 +134,7 @@ class UltraDictTests(unittest.TestCase):
         pass
 
     # Turns out MacOS can only do 24 characters in total
-    #def test_longest_name(self):
+    # def test_longest_name(self):
     #    for i in range(5, 50):
     #        print('Loop ', i)
     #        ultra = UltraDict(name='x' * i)
@@ -136,21 +143,27 @@ class UltraDictTests(unittest.TestCase):
     def test_cleanup(self):
         # TODO
         import psutil
+
         p = psutil.Process()
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "file handle count before before tests should be 0")
-        ultra = UltraDict(nested={ 1: 1})
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 4, "file handle count with one simple UltraDict should be 4")
+        # Counted as a delta, not an absolute: handles the process already holds are none
+        # of this test's business. On the CI runner under 3.14 a read handle on the
+        # interpreter binary is open before this test starts, which an absolute count
+        # reports as a leak.
+        baseline = len(p.open_files())
+
+        def assert_open_files(expected, what):
+            files = p.open_files()
+            self.assertEqual(len(files) - baseline, expected, f"{what} should be {expected}, open files are {files}")
+
+        assert_open_files(0, "file handle count before before tests")
+        ultra = UltraDict(nested={1: 1})
+        assert_open_files(4, "file handle count with one simple UltraDict")
         del ultra
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "file handle count after deleting the UltraDict should be 0 again")
-        ultra = UltraDict(nested={ 1: 1}, recurse=True)
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 12, "nested file handle count should be 12")
+        assert_open_files(0, "file handle count after deleting the UltraDict")
+        ultra = UltraDict(nested={1: 1}, recurse=True)
+        assert_open_files(12, "nested file handle count")
         del ultra
-        file_count = len(p.open_files())
-        self.assertEqual(file_count, 0, "nested file handle count after deleting UltraDict should be 0 again")
+        assert_open_files(0, "nested file handle count after deleting UltraDict")
 
     def test_example_simple(self):
         filename = "examples/simple.py"
@@ -168,7 +181,11 @@ class UltraDictTests(unittest.TestCase):
         filename = "examples/nested.py"
         ret = self.exec(filename)
         self.assertReturnCode(ret)
-        self.assertEqual(ret.stdout.splitlines()[-1], b"{'nested': {'deeper': {0: 2}}}  ==  {'nested': {'deeper': {0: 2}}}", self.exec_show_output(ret))
+        self.assertEqual(
+            ret.stdout.splitlines()[-1],
+            b"{'nested': {'deeper': {0: 2}}}  ==  {'nested': {'deeper': {0: 2}}}",
+            self.exec_show_output(ret),
+        )
 
     def test_example_recover_from_stale_lock(self):
         filename = "examples/recover_from_stale_lock.py"
@@ -229,15 +246,17 @@ class UltraDictTests(unittest.TestCase):
         ultra = UltraDict(shared_lock=True)
         ultra.lock.lock_remote[0:1] = b'\x01'
 
-        def touch_lock_time():
+        # The activity is injected into the watch loop's own sleep rather than raced in
+        # from a timer thread: a timer has to win against a 100ms watch, and on a loaded
+        # runner it can lose, failing the test for scheduling reasons rather than logic.
+        real_sleep = time.sleep
+
+        def touch_lock_time_while_watching(seconds):
+            real_sleep(seconds)
             ultra.lock.lock_time_remote[:] = int(time.time() * 1000).to_bytes(8, 'little')
 
-        timer = threading.Timer(0.02, touch_lock_time)
-        timer.start()
-        try:
+        with mock.patch.object(time, 'sleep', touch_lock_time_while_watching):
             self.assertFalse(ultra.lock.steal_from_dead(from_pid=0))
-        finally:
-            timer.join()
         self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
 
     def _sized_probe(self, path):
@@ -253,7 +272,7 @@ class UltraDictTests(unittest.TestCase):
 
     def test_wait_until_sized_waits_for_the_creator(self):
         """A segment with no size yet is waited on, not attached to."""
-        import tempfile, threading
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, 'segment')
@@ -330,7 +349,7 @@ class UltraDictTests(unittest.TestCase):
         unlinks it before re-raising -- so this fails on the exception and, had it not, on the
         segment having been destroyed.
         """
-        import _posixshmem, threading
+        import _posixshmem
 
         name = 'ultra_unsized_segment'
         try:

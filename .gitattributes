@@ -1,0 +1,2 @@
+# store and check out LF everywhere, regardless of core.autocrlf
+* text=auto eol=lf

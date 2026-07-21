@@ -8,6 +8,13 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+      - run: uv run --only-group dev pre-commit run --all-files --show-diff-on-failure
+
   # fast signal: run the suite against the pure-python source on native runners
   test-native:
     name: ${{ matrix.os }} / py${{ matrix.python }}
@@ -20,15 +27,19 @@ jobs:
         python: ['3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v8.3.2
         with:
           python-version: ${{ matrix.python }}
 
+      # --no-install-project: this job exercises the pure-python source in the
+      # checkout, so only the runtime dependencies are needed
+      # --no-dev: uv installs the dev group by default; the lint tooling has no
+      # business in the environment under test
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: uv sync --locked --no-install-project --no-dev
 
       - name: Run unit tests
-        run: python -m unittest
+        run: uv run --no-sync python -m unittest
 
   # same job the release runs: build and test the compiled wheels on every
   # supported platform

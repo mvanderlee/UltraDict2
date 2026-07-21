@@ -15,12 +15,15 @@
 # test_attaching_to_an_unsized_segment builds the window directly and catches it every time.
 #
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from UltraDict2 import UltraDict
+import multiprocessing
+import time
 
-import multiprocessing, time
+from UltraDict2 import UltraDict
 
 workers = 8
 attempts = 5

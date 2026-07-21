@@ -5,16 +5,21 @@
 # A strategy for recovery with a timeout is demonstrated.
 #
 
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import multiprocessing
+import signal
+import subprocess
+import time
 
 from UltraDict2 import UltraDict
 
-import multiprocessing, time, signal, subprocess
-
 # For better visibility in console, only count to 100
 count = 100
-#count = 10_000
+# count = 10_000
 
 number_of_processes = 5
 
@@ -27,6 +32,7 @@ simulate_crash_at_target_count = 10
 # should be allowed to steal the lock afterchecking that the blocking
 # process is actually dead.
 stale_lock_timeout = 1.0
+
 
 def possibly_simulate_crash(d):
     """
@@ -41,11 +47,12 @@ def possibly_simulate_crash(d):
         if hasattr(signal, 'SIGKILL'):
             os.kill(process.pid, signal.SIGKILL)
         elif sys.platform == 'win32':
-            subprocess.call(['taskkill', '/F', '/PID',  str(process.pid)])
+            subprocess.call(['taskkill', '/F', '/PID', str(process.pid)])
         else:
             raise Exception("Don't know how to kill process to simulate a crash")
         # This message should never print
         print("Killed. (This message should never print!)")
+
 
 def run(name, target):
     d = UltraDict(name=name)
@@ -83,7 +90,6 @@ def run(name, target):
                 possibly_simulate_crash(d)
 
         except d.Exceptions.CannotAcquireLock as e:
-
             # We measure the time on how long we fail to acquire a lock
             if not time_start:
                 time_start = e.timestamp
@@ -92,14 +98,17 @@ def run(name, target):
             # We should not be the blocking pid
             assert process.pid != blocking_pid
 
-            #time.sleep(0.1)
+            # time.sleep(0.1)
             time_passed = time.monotonic() - time_start
 
             # If the lock is stale for more than 1 second (plus the time for the initial attempt),
             # we will steal it.
             if time_passed >= stale_lock_timeout:
-
-                print(process.name, process.pid, f"cannot acquire lock, more than {stale_lock_timeout} s have passed, lock must be stale")
+                print(
+                    process.name,
+                    process.pid,
+                    f"cannot acquire lock, more than {stale_lock_timeout} s have passed, lock must be stale",
+                )
 
                 # The lock blocking pid cannot not be our pid, after all we could not acquire the lock
                 assert process.pid != blocking_pid
@@ -112,12 +121,12 @@ def run(name, target):
                 time_start = 0
                 blocking_pid = 0
             else:
-                print(f'{process.name} {multiprocessing.current_process().pid} cannot acquire lock, will try again, {time_passed:.3f} s have passed')
-
+                print(
+                    f'{process.name} {multiprocessing.current_process().pid} cannot acquire lock, will try again, {time_passed:.3f} s have passed'
+                )
 
 
 if __name__ == '__main__':
-
     ultra = UltraDict(buffer_size=10_000, shared_lock=True)
     ultra['counter'] = 0
 
@@ -135,8 +144,8 @@ if __name__ == '__main__':
     for p in processes:
         p.join()
 
-    #print(ultra)
-    #ultra.print_status()
-    #ultra.lock.print_status()
+    # print(ultra)
+    # ultra.print_status()
+    # ultra.lock.print_status()
 
     print("Counter:", ultra['counter'], '==', count)

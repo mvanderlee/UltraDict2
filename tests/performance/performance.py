@@ -1,4 +1,7 @@
-import sys, os, time, multiprocessing
+import multiprocessing
+import sys
+import time
+
 sys.path.insert(0, '../../..')
 
 count = 1_000_000
@@ -9,15 +12,17 @@ count = 100_000
 
 ranking = {}
 
+
 def print_perf(name, operation, t_start, t_end, iterations):
     t = t_end - t_start
     speed = round(iterations / t)
     print(f"{name} ({operation}) = {speed:,d} ops per second")
 
-    if not operation in ranking:
+    if operation not in ranking:
         ranking[operation] = {}
 
     ranking[operation][name] = speed
+
 
 def print_ranking():
     print('\nRanking:')
@@ -28,19 +33,20 @@ def print_ranking():
             if not top:
                 top = value
 
-            multiple = round(top/value, 2)
+            multiple = round(top / value, 2)
             print(f'    {name} = {value:,d} (factor {multiple})')
+
 
 def main():
 
     print(f"\nTesting Performance with {count!r} operations each\n")
-
 
     ##
     ## Redis
     ##
 
     import redis
+
     r = redis.Redis()
 
     # Redis (writes)
@@ -101,6 +107,7 @@ def main():
     ##
 
     import UltraDict2
+
     ultra = UltraDict2.UltraDict()
 
     # UltraDict (writes)
@@ -117,7 +124,7 @@ def main():
     t_end = time.perf_counter()
     print_perf('UltraDict', 'reads', t_start, t_end, count)
 
-    ultra = UltraDict.UltraDict(shared_lock=True)
+    ultra = UltraDict2.UltraDict(shared_lock=True)
 
     # UltraDict with shared_lock=True (writes)
     t_start = time.perf_counter()
@@ -136,6 +143,6 @@ def main():
 
     print_ranking()
 
+
 if __name__ == '__main__':
     main()
-
