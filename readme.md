@@ -434,6 +434,72 @@ Other things you can do:
 
 ```
 
+## Metrics
+
+`get_metrics()` returns a plain dataclass of scalars, so you can feed a monitoring system
+without UltraDict pulling in a monitoring dependency.
+
+```python
+>>> ultra = UltraDict()
+>>> ultra['some key'] = 'some value'
+>>> ultra.get_metrics()
+Metrics(item_count=1, item_size_bytes_min=39, item_size_bytes_max=39, item_size_bytes_sum=39,
+        item_size_observations_total=1, buffer_size_bytes=10000, buffer_used_bytes=45,
+        buffer_used_fraction=0.0045, full_dump_size_bytes=None, full_dump_last_bytes=None,
+        full_dump_total=0, buffer_full_forced_dump_total=0, full_dump_memory_full_total=0,
+        full_dump_too_fast_total=0, shm_total_bytes=67108864, shm_used_bytes=1052672,
+        shm_free_bytes=66056192)
+```
+
+The item size fields describe the *serialized size of the writes this instance has made*,
+not a measurement of the current contents. Measuring the latter would mean re-serializing
+every key on every call. The mean is `item_size_bytes_sum / item_size_observations_total`.
+
+The `shm_*` fields report the whole `/dev/shm` filesystem, shared by every process on the
+machine. They are `None` on platforms without `/dev/shm`, such as Windows and macOS.
+
+Counters are per instance, are never shared through the control memory, and reset when the
+process restarts. `get_metrics()` takes no lock, so a value can be one write stale.
+
+### Exporting to Prometheus
+
+Register a collector that scrapes on demand:
+
+```python
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, REGISTRY
+
+class UltraDictCollector:
+    def __init__(self, ultra):
+        self.ultra = ultra
+
+    def collect(self):
+        metrics = self.ultra.get_metrics()
+        labels  = [self.ultra.name]
+
+        gauge = GaugeMetricFamily('ultradict_items', 'Items in the dict', labels=['name'])
+        gauge.add_metric(labels, metrics.item_count)
+        yield gauge
+
+        gauge = GaugeMetricFamily('ultradict_buffer_used_fraction', 'Update buffer fill level', labels=['name'])
+        gauge.add_metric(labels, metrics.buffer_used_fraction)
+        yield gauge
+
+        counter = CounterMetricFamily('ultradict_buffer_full_forced_dumps', 'Full dumps caused by a full buffer', labels=['name'])
+        counter.add_metric(labels, metrics.buffer_full_forced_dump_total)
+        yield counter
+
+REGISTRY.register(UltraDictCollector(ultra))
+```
+
+What to watch:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `buffer_full_forced_dump_total` rising | `buffer_size` is too small for your write rate. Every event is a full dump of the whole dict. |
+| `full_dump_memory_full_total` > 0 | The dict outgrew a static `full_dump_size`. Writes are failing. |
+| `full_dump_too_fast_total` rising | Readers cannot keep up with the dump rate and are reloading. |
+| `shm_free_bytes` falling | The machine is running out of shared memory, possibly because of leaked segments. |
+
 ## Contributing
 
 Contributions are always welcome!

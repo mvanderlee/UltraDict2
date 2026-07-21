@@ -68,6 +68,63 @@ class UltraDictTests(unittest.TestCase):
 
         self.assertEqual(len(other.data['huge']), length)
 
+    def test_metrics(self):
+        """A fresh dict reports nothing observed; writes move the counters."""
+        ultra = UltraDict()
+
+        metrics = ultra.get_metrics()
+        self.assertEqual(metrics.item_count, 0)
+        self.assertEqual(metrics.item_size_observations_total, 0)
+        self.assertIsNone(metrics.item_size_bytes_min)
+        self.assertIsNone(metrics.item_size_bytes_max)
+        self.assertIsNone(metrics.full_dump_last_bytes)
+        self.assertEqual(metrics.buffer_used_bytes, 0)
+        self.assertEqual(metrics.buffer_used_fraction, 0)
+
+        ultra['a'] = 1
+        ultra['b'] = ' ' * 1000
+
+        metrics = ultra.get_metrics()
+        self.assertEqual(metrics.item_count, 2)
+        self.assertEqual(metrics.item_size_observations_total, 2)
+        self.assertLessEqual(metrics.item_size_bytes_min, metrics.item_size_bytes_max)
+        self.assertGreaterEqual(metrics.item_size_bytes_sum, metrics.item_size_bytes_max)
+        self.assertGreater(metrics.buffer_used_bytes, 0)
+        self.assertLess(metrics.buffer_used_fraction, 1)
+        self.assertEqual(metrics.buffer_size_bytes, ultra.buffer_size)
+        self.assertEqual(metrics.buffer_full_forced_dump_total, 0)
+        self.assertIsNone(metrics.full_dump_size_bytes)
+
+    def test_metrics_buffer_full(self):
+        """A value too big for the buffer counts as a forced full dump, not an error."""
+        ultra = UltraDict()
+
+        ultra['huge'] = ' ' * 1_000_000
+
+        metrics = ultra.get_metrics()
+        self.assertEqual(metrics.buffer_full_forced_dump_total, 1)
+        self.assertEqual(metrics.full_dump_total, 1)
+        self.assertGreater(metrics.full_dump_last_bytes, 1_000_000)
+        self.assertEqual(metrics.full_dump_memory_full_total, 0)
+        # The forced dump resets the stream
+        self.assertEqual(metrics.buffer_used_bytes, 0)
+
+    def test_metrics_full_dump_memory_full(self):
+        """A static full dump memory too small to hold the dict raises and is counted."""
+        ultra = UltraDict(buffer_size=4096, full_dump_size=4096)
+
+        # The OS rounds a segment up to a page, and a page is 16 KiB on Apple Silicon, so a
+        # 4096 byte request can hand back four times that. Ask the segment how big it
+        # actually is instead of assuming the requested size is what we got.
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            ultra['huge'] = ' ' * (ultra.full_dump_memory.size * 2)
+
+        metrics = ultra.get_metrics()
+        self.assertEqual(metrics.full_dump_memory_full_total, 1)
+        self.assertEqual(metrics.full_dump_size_bytes, 4096)
+        self.assertEqual(metrics.buffer_full_forced_dump_total, 1)
+        self.assertEqual(metrics.full_dump_total, 0)
+
     def test_parameter_passing(self):
         ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`

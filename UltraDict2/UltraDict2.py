@@ -26,6 +26,7 @@ import multiprocessing.shared_memory
 import multiprocessing.synchronize
 import os
 import pickle
+import shutil
 import sys
 import threading
 import time
@@ -48,6 +49,7 @@ except ImportError:
 import logging as log
 
 from . import Exceptions
+from .Metrics import Metrics
 
 # Seconds a waiter tolerates no progress before checking whether the lock owner died. It does not
 # bound the wait: a live owner is waited on for as long as it keeps working.
@@ -505,6 +507,17 @@ class UltraDict(collections.UserDict, dict):
         # remote, we need to load a full dump
         self.full_dump_counter = 0
 
+        # Metrics, local to this instance and never shared through the control block.
+        # ponytail: plain += relies on the GIL, needs a lock under free-threading
+        self.item_size_min = None
+        self.item_size_max = None
+        self.item_size_sum = 0
+        self.item_size_count = 0
+        self.full_dump_length = None
+        self.buffer_full_forced_dump = 0
+        self.full_dump_memory_full = 0
+        self.full_dump_too_fast = 0
+
         self.closed = False
         self.auto_unlink = auto_unlink
 
@@ -823,6 +836,7 @@ class UltraDict(collections.UserDict, dict):
             # log.debug("Full dump memory: ", full_dump_memory)
 
             if length + 6 > full_dump_memory.size:
+                self.full_dump_memory_full += 1
                 raise Exceptions.FullDumpMemoryFull(
                     f'Full dump memory too small for full dump: needed={length + 6} got={full_dump_memory.size}'
                 )
@@ -850,6 +864,7 @@ class UltraDict(collections.UserDict, dict):
             if not (self.full_dump_size and self.full_dump_memory):
                 self.full_dump_memory_name_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
 
+            self.full_dump_length = length
             self.full_dump_counter += 1
             current = int.from_bytes(self.full_dump_counter_remote, 'little')
             # Now also increment the remote counter
@@ -966,12 +981,20 @@ class UltraDict(collections.UserDict, dict):
         marshalled = self.serializer.dumps((not delete, key, item))
         length = len(marshalled)
 
+        self.item_size_sum += length
+        self.item_size_count += 1
+        if self.item_size_min is None or length < self.item_size_min:
+            self.item_size_min = length
+        if self.item_size_max is None or length > self.item_size_max:
+            self.item_size_max = length
+
         with self.lock:
             start_position = int.from_bytes(self.update_stream_position_remote, 'little')
             # 6 bytes for the header
             end_position = start_position + length + 6
             # log.debug("Update start from={} len={}", start_position, length)
             if end_position > self.buffer_size:
+                self.buffer_full_forced_dump += 1
                 # log.debug("Buffer is full")
 
                 # todo: is is necessary? apply_update() is also done inside dump()
@@ -1042,6 +1065,7 @@ class UltraDict(collections.UserDict, dict):
                     log.warning(
                         f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                     )
+                    self.full_dump_too_fast += 1
                     return self.apply_update()
 
                 # As a last resort, let's get a lock. This way we are safe but slow.
@@ -1050,6 +1074,7 @@ class UltraDict(collections.UserDict, dict):
                         log.warning(
                             f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                         )
+                        self.full_dump_too_fast += 1
                         return self.apply_update()
 
                 raise e
@@ -1169,6 +1194,40 @@ class UltraDict(collections.UserDict, dict):
         if not status:
             status = self.status()
         pprint.pprint(status, stream=sys.stderr if stderr else sys.stdout)
+
+    def get_metrics(self):
+        """Snapshot of this instance's runtime metrics as a Metrics dataclass.
+
+        Like status(), this takes no lock and does not apply pending updates, so
+        item_count reflects our last applied view of the dict.
+        """
+        buffer_used = int.from_bytes(self.update_stream_position_remote, 'little')
+
+        # macOS is posix but has no /dev/shm, so check the directory, not the platform
+        if os.path.isdir('/dev/shm'):
+            shm_total, shm_used, shm_free = shutil.disk_usage('/dev/shm')
+        else:
+            shm_total = shm_used = shm_free = None
+
+        return Metrics(
+            item_count=len(self.data),
+            item_size_bytes_min=self.item_size_min,
+            item_size_bytes_max=self.item_size_max,
+            item_size_bytes_sum=self.item_size_sum,
+            item_size_observations_total=self.item_size_count,
+            buffer_size_bytes=self.buffer_size,
+            buffer_used_bytes=buffer_used,
+            buffer_used_fraction=buffer_used / self.buffer_size,
+            full_dump_size_bytes=self.full_dump_size,
+            full_dump_last_bytes=self.full_dump_length,
+            full_dump_total=self.full_dump_counter,
+            buffer_full_forced_dump_total=self.buffer_full_forced_dump,
+            full_dump_memory_full_total=self.full_dump_memory_full,
+            full_dump_too_fast_total=self.full_dump_too_fast,
+            shm_total_bytes=shm_total,
+            shm_used_bytes=shm_used,
+            shm_free_bytes=shm_free,
+        )
 
     def cleanup(self):
         # log.debug('Cleanup')
