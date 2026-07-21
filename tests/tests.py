@@ -125,6 +125,96 @@ class UltraDictTests(unittest.TestCase):
         self.assertEqual(metrics.buffer_full_forced_dump_total, 1)
         self.assertEqual(metrics.full_dump_total, 0)
 
+    def test_full_dump_memory_full_rolls_back(self):
+        """A write that could not be published must not survive in the local copy."""
+        ultra = UltraDict(buffer_size=4096, full_dump_size=4096)
+
+        # Sized from the segment, not the request: the OS rounds up to a page, which is
+        # 16 KiB on Apple Silicon
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            ultra['huge'] = ' ' * (ultra.full_dump_memory.size * 2)
+
+        self.assertNotIn('huge', ultra.data)
+        self.assertEqual(len(ultra), 0)
+
+        # Not wedged either: a value that does fit still gets through afterwards
+        ultra['small'] = 1
+
+        other = UltraDict(name=ultra.name)
+        self.assertEqual(other.data, {'small': 1})
+
+    def test_full_dump_memory_full_rolls_back_delete(self):
+        """A delete that could not be published must not vanish from the local copy."""
+        import pickle
+
+        # 65536 is a whole number of pages on every platform, so the buffer really is
+        # the size we asked for
+        ultra = UltraDict(buffer_size=65536, full_dump_size=4096)
+
+        key = 'k' * 3000
+        ultra[key] = 1
+        # Big enough that what is left after the delete still cannot be dumped
+        ultra['pad'] = 'p' * (ultra.full_dump_memory.size * 2)
+
+        # Fill until a delete frame no longer fits. Every filler is far smaller than the
+        # delete frame, so a filler can never be the write that overflows.
+        delete_frame = len(pickle.dumps((False, key, b''))) + 6
+        filler = 0
+        while ultra.get_metrics().buffer_used_bytes + delete_frame <= ultra.buffer_size:
+            ultra[f'fill{filler}'] = 'x' * 150
+            filler += 1
+
+        # Precondition: the setup itself never dumped, so the delete below is the write
+        # that overflows. Fails loudly here rather than silently testing nothing.
+        self.assertEqual(ultra.full_dump_counter, 0)
+        before = len(ultra.data)
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            del ultra[key]
+
+        self.assertIn(key, ultra.data)
+        self.assertEqual(len(ultra.data), before)
+
+    def test_metrics_ignore_failed_writes(self):
+        """A write that never landed is not an observation."""
+        ultra = UltraDict(buffer_size=4096, full_dump_size=4096)
+        ultra['a'] = 1
+        before = ultra.get_metrics()
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            ultra['huge'] = ' ' * (ultra.full_dump_memory.size * 2)
+
+        after = ultra.get_metrics()
+        self.assertEqual(after.item_size_observations_total, before.item_size_observations_total)
+        self.assertEqual(after.item_size_bytes_sum, before.item_size_bytes_sum)
+        self.assertEqual(after.item_size_bytes_max, before.item_size_bytes_max)
+        # The failure itself is still counted
+        self.assertEqual(after.full_dump_memory_full_total, 1)
+
+    def test_inplace_or_publishes(self):
+        """`d |= other` has to reach our peers like any other write."""
+        ultra = UltraDict()
+        ultra['a'] = 1
+
+        ultra |= {'b': 2}
+        self.assertEqual(UltraDict(name=ultra.name).data, {'a': 1, 'b': 2})
+
+        source = UltraDict()
+        source['c'] = 3
+        ultra |= source
+        self.assertEqual(UltraDict(name=ultra.name).data, {'a': 1, 'b': 2, 'c': 3})
+
+    def test_dump_counter_never_leads_remote(self):
+        """A local counter ahead of the remote one would stop this instance ever reloading."""
+        ultra = UltraDict()
+        ultra['huge'] = ' ' * 1_000_000
+
+        self.assertEqual(ultra.full_dump_counter, 1)
+        self.assertLessEqual(
+            ultra.full_dump_counter,
+            int.from_bytes(ultra.full_dump_counter_remote, 'little'),
+        )
+
     def test_parameter_passing(self):
         ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`
@@ -182,6 +272,59 @@ class UltraDictTests(unittest.TestCase):
 
         with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
             ultra = UltraDict(name=name, create=False)
+
+    def test_cannot_create_shared_memory_is_typed(self):
+        """A size no host can back reports as our own error, whatever the platform raises."""
+        # 2**48 is past the user address space on 64 bit, and past ssize_t on 32 bit, where
+        # mmap rejects it as OverflowError before the OS ever sees it
+        for size in (2**48, 2**64):
+            with self.subTest(size=size):
+                with self.assertRaises(UltraDict.Exceptions.CannotCreateSharedMemory) as ctx:
+                    UltraDict.get_memory(create=True, size=size)
+
+                # The original stays reachable, so errno and winerror can still be read
+                self.assertIsInstance(ctx.exception.__cause__, (OSError, OverflowError))
+
+    def test_full_dumps_too_fast_is_bounded(self):
+        """A reader that can never catch up gives up typed, instead of recursing until the stack ends."""
+        ultra = UltraDict()
+
+        # What a reader sees when dumps outrun it: a counter it can never reach
+        ultra.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+            ultra.apply_update()
+
+    def test_full_dumps_too_fast_respects_max_retry(self):
+        """The bound is a parameter, not a hardcoded recursion depth."""
+        ultra = UltraDict()
+        ultra.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+            ultra.load(force=True, max_retry=0)
+
+    def test_apply_update_threads_the_retry_count(self):
+        """Every apply_update() recursion must carry the retry count, or the bound never bites."""
+        writer = UltraDict()
+        writer['a'] = 1
+
+        reader = UltraDict(name=writer.name)
+        # Behind on the stream, and behind on dumps we can never load
+        reader.update_stream_position = 0
+        reader.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        # Stub load() the way a real one behaves except for closing the counter gap: it
+        # rewinds the stream, so every attempt replays and then finds itself stale again.
+        # That models a dump that was already superseded by the time we loaded it.
+        def rewind(*args, **kwargs):
+            reader.update_stream_position = 0
+
+        with mock.patch.object(reader, 'load', side_effect=rewind):
+            with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+                reader.apply_update()
+
+            # One attempt per retry, then the guard fires before a fifth
+            self.assertEqual(reader.load.call_count, 4)
 
     def test_lock_blocking(self):
         pass

@@ -804,6 +804,19 @@ class UltraDict(collections.UserDict, dict):
                         raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists") from None
                     # We lost the creation race against another process; attach instead
                     continue
+                except (OSError, OverflowError) as e:
+                    # Anything other than the collision above means the host could not back
+                    # the segment. Errno is not dependable here: an exhausted Windows paging
+                    # file reports EINVAL, not ENOSPC, so the type is the filter. OverflowError
+                    # joins it because a size beyond ssize_t never reaches the OS at all: on a
+                    # 32-bit build mmap rejects it, which is a host limit like any other.
+                    raise Exceptions.CannotCreateSharedMemory(
+                        f"Cannot create shared memory of {size} bytes: {e}. The host is out of shared "
+                        "memory or file descriptors. On Linux, grow /dev/shm (eg. `docker run "
+                        "--shm-size=1g`) or look for segments left behind by crashed processes; on "
+                        "Windows, grow the paging file. Setting full_dump_size stops a new segment "
+                        "being allocated for every dump."
+                    ) from e
                 # Remember that we have created this memory
                 memory.created_by_ultra = True
                 # log.debug('Created shared memory: ', memory.name)
@@ -865,10 +878,12 @@ class UltraDict(collections.UserDict, dict):
                 self.full_dump_memory_name_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
 
             self.full_dump_length = length
-            self.full_dump_counter += 1
             current = int.from_bytes(self.full_dump_counter_remote, 'little')
-            # Now also increment the remote counter
+            # Remote first: raising in between with only the local counter bumped would put
+            # us permanently ahead of everyone, and every reload guard compares local against
+            # remote, so this instance would stop seeing peer updates for good
             self.full_dump_counter_remote[:] = int(current + 1).to_bytes(4, 'little')
+            self.full_dump_counter += 1
 
             # Reset the stream position to zero as we have
             # just provided a fresh new full dump
@@ -877,13 +892,16 @@ class UltraDict(collections.UserDict, dict):
 
             # log.info("Dumped dict with {} elements to {} bytes, remote_counter={}", len(self), len(marshalled), current+1)
 
-            # If the old full dump memory was dynamically created, delete it
-            if old and old != full_dump_memory.name and not self.full_dump_size:
-                self.unlink_by_name(old)
-
             # On Windows, we need to keep a reference to the full dump memory,
-            # otherwise it's destoryed
+            # otherwise it's destoryed. Taken before the unlink below, which can raise:
+            # without the reference that would destroy the dump we just published.
             self.full_dump_memory = full_dump_memory
+
+            # If the old full dump memory was dynamically created, delete it. The dump is
+            # already published at this point, so failing to reap the old segment costs a
+            # leaked segment and must not fail the write.
+            if old and old != full_dump_memory.name and not self.full_dump_size:
+                self.unlink_by_name(old, ignore_errors=True)
 
             return full_dump_memory
 
@@ -913,7 +931,7 @@ class UltraDict(collections.UserDict, dict):
                 raise e
 
     # @profile
-    def load(self, force=False):
+    def load(self, force=False, max_retry=3, retry=0):
         """
         Opportunistacally load full dumps without any locking.
 
@@ -966,8 +984,18 @@ class UltraDict(collections.UserDict, dict):
             if full_dump_delta > 1:
                 # If more than one new full dump was created during the time we were trying to load one full dump
                 # it can happen that our full dump has just disappeared
-                return self.load(force=True)
-            # TODO: Before we reach max recursion depth, try to load the full dump using a lock
+                if retry < max_retry:
+                    return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+                elif retry == max_retry:
+                    # On the last retry, take the lock so nobody can dump while we read
+                    with self.lock:
+                        return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+                raise Exceptions.FullDumpsTooFast(
+                    f"Full dumps too fast, gave up loading after {max_retry} retries "
+                    f"full_dump_counter={self.full_dump_counter} "
+                    f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                    "Consider increasing buffer_size."
+                )
             self.print_status()
             raise e
 
@@ -981,13 +1009,6 @@ class UltraDict(collections.UserDict, dict):
         marshalled = self.serializer.dumps((not delete, key, item))
         length = len(marshalled)
 
-        self.item_size_sum += length
-        self.item_size_count += 1
-        if self.item_size_min is None or length < self.item_size_min:
-            self.item_size_min = length
-        if self.item_size_max is None or length > self.item_size_max:
-            self.item_size_max = length
-
         with self.lock:
             start_position = int.from_bytes(self.update_stream_position_remote, 'little')
             # 6 bytes for the header
@@ -999,24 +1020,65 @@ class UltraDict(collections.UserDict, dict):
 
                 # todo: is is necessary? apply_update() is also done inside dump()
                 self.apply_update()
-                if not delete:
+
+                # Nothing goes to the stream on this path, dump() publishes self.data
+                # instead, so the change has to be applied before dumping. Snapshot what
+                # we are replacing first, taken after apply_update() so it matches what
+                # our peers see, and put it back if the dump does not happen: a change
+                # kept only in our own copy is one no peer will ever hear about.
+                had_key = key in self.data
+                old_item = self.data.get(key)
+                if delete:
+                    self.data.__delitem__(key)
+                else:
                     self.data.__setitem__(key, item)
-                self.dump()
-                return
 
-            marshalled = b'\xff' + length.to_bytes(4, 'little') + b'\xff' + marshalled
+                try:
+                    self.dump()
+                except Exception:
+                    if had_key:
+                        self.data.__setitem__(key, old_item)
+                    else:
+                        self.data.pop(key, None)
+                    raise
+            else:
+                # Applied before publishing: the buffer write below is a bounds-checked
+                # slice assignment that cannot fail, while an unhashable key must still
+                # fail here rather than emit a frame every peer would choke on
+                if delete:
+                    self.data.__delitem__(key)
+                else:
+                    self.data.__setitem__(key, item)
 
-            # Write body with the real data
-            self.buffer.buf[start_position:end_position] = marshalled
+                marshalled = b'\xff' + length.to_bytes(4, 'little') + b'\xff' + marshalled
 
-            # Inform others about it
-            self.update_stream_position = end_position
-            self.update_stream_position_remote[:] = end_position.to_bytes(4, 'little')
-            # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
+                # Write body with the real data
+                self.buffer.buf[start_position:end_position] = marshalled
+
+                # Inform others about it
+                self.update_stream_position = end_position
+                self.update_stream_position_remote[:] = end_position.to_bytes(4, 'little')
+                # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
+
+            # Only writes that actually landed are worth measuring
+            self.item_size_sum += length
+            self.item_size_count += 1
+            if self.item_size_min is None or length < self.item_size_min:
+                self.item_size_min = length
+            if self.item_size_max is None or length > self.item_size_max:
+                self.item_size_max = length
 
     # @profile
-    def apply_update(self):
+    def apply_update(self, max_retry=3, retry=0):
         """Opportunistically apply dict changes from shared memory stream without any locking."""
+
+        if retry > max_retry:
+            raise Exceptions.FullDumpsTooFast(
+                f"Full dumps too fast, gave up applying updates after {max_retry} retries "
+                f"full_dump_counter={self.full_dump_counter} "
+                f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                "Consider increasing buffer_size."
+            )
 
         if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
             self.load(force=True)
@@ -1056,7 +1118,7 @@ class UltraDict(collections.UserDict, dict):
                 # a lock; frames we just applied could then be stale. Detect it via the
                 # dump counter (always incremented before the stream reset) and reload.
                 if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
-                    return self.apply_update()
+                    return self.apply_update(max_retry=max_retry, retry=retry + 1)
             except (AssertionError, pickle.UnpicklingError) as e:
                 # It can happen that a slow process is not fast enough reading the stream and some
                 # other process already got around overwriting the current position. It is possible to
@@ -1066,7 +1128,7 @@ class UltraDict(collections.UserDict, dict):
                         f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                     )
                     self.full_dump_too_fast += 1
-                    return self.apply_update()
+                    return self.apply_update(max_retry=max_retry, retry=retry + 1)
 
                 # As a last resort, let's get a lock. This way we are safe but slow.
                 with self.lock:
@@ -1075,7 +1137,7 @@ class UltraDict(collections.UserDict, dict):
                             f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                         )
                         self.full_dump_too_fast += 1
-                        return self.apply_update()
+                        return self.apply_update(max_retry=max_retry, retry=retry + 1)
 
                 raise e
 
@@ -1091,16 +1153,23 @@ class UltraDict(collections.UserDict, dict):
         for k, v in kwargs.items():
             self[k] = v
 
+    def __ior__(self, other):
+        # UserDict merges straight into self.data, which publishes nothing, so peers
+        # never see it and the next full dump load throws it away
+        self.update(other.data if isinstance(other, UltraDict) else other)
+        return self
+
     def __delitem__(self, key):
         # log.debug("__delitem__ {}", key)
         with self.lock:
             self.apply_update()
 
-            # Update our local copy
-            self.data.__delitem__(key)
+            # Fail before publishing, or peers replay a delete for a key nobody has
+            if key not in self.data:
+                raise KeyError(key)
 
+            # append_update() updates our local copy once the change is published
             self.append_update(key, b'', delete=True)
-            # TODO: Do something if append_update() fails
 
     def __setitem__(self, key, item):
         # log.debug("__setitem__ {}, {}", key, item)
@@ -1126,13 +1195,8 @@ class UltraDict(collections.UserDict, dict):
                     if item.name not in self.recurse_register.data:
                         self.recurse_register[item.name] = True
 
-            # Update our local copy
-            # It's important for the integrity to do this first
-            self.data.__setitem__(key, item)
-
-            # Append the update to the update stream
+            # Append the update to the update stream, which also updates our local copy
             self.append_update(key, item)
-            # TODO: Do something if append_u int.from_bytes(self.update_stream_position_remote, 'little')pdate() fails
 
     def __getitem__(self, key):
         # log.debug("__getitem__ {}", key)

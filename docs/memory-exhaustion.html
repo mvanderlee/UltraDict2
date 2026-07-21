@@ -278,9 +278,9 @@
 
 <header>
   <h1>What happens when UltraDict2 runs out of memory</h1>
-  <p class="sub">Four distinct failure modes, only one of which is designed. This describes
-  current behaviour in the code as it stands, not what it ought to do. Line references are to
-  <code>UltraDict2/UltraDict2.py</code>.</p>
+  <p class="sub">Four distinct failure modes, only one of which is designed. Each now fails in a
+  named, recoverable way — this describes what the code actually does today, including the gaps
+  that remain. Code shown is from <code>UltraDict2/UltraDict2.py</code>.</p>
 </header>
 
 <p>UltraDict2 keeps a dict in POSIX shared memory across processes. Three separate shared
@@ -416,27 +416,48 @@ sequenceDiagram
   </dl>
 </div>
 
-<h2><span class="num">§2</span>The full dump memory is too small <span class="verdict v-bad">Hard failure</span></h2>
+<h2><span class="num">§2</span>The full dump memory is too small <span class="verdict v-warn">Fails cleanly</span></h2>
 
 <p>Only reachable with a static <code>full_dump_size</code>. That segment is allocated once at
 construction and is never resized, so once the dict outgrows it, <code>dump()</code> raises:</p>
 
-<pre><code>if length + 6 &gt; full_dump_memory.size:        # :700
+<pre><code>if length + 6 &gt; full_dump_memory.size:
+    self.full_dump_memory_full += 1
     raise Exceptions.FullDumpMemoryFull(...)</code></pre>
 
 <p>The exception propagates out through <code>dump()</code>, <code>append_update()</code> and
-<code>__setitem__</code> to your code. The important part is the state it leaves behind. Look at
-the overflow branch in §1 again: <code>self.data[key] = item</code> ran <em>before</em>
-<code>self.dump()</code>. So:</p>
+<code>__setitem__</code> to your code. What matters is the state it leaves behind, and that used
+to be bad. The overflow branch in §1 publishes nothing to the stream — the change rides
+entirely on the dump — so a failed dump once left the writer holding an item that existed in
+exactly one process and nowhere else, with the buffer still full so every later write raised
+again. Permanently wedged, silently divergent.</p>
 
-<ul>
-  <li>the writing process has the new item in its local <code>data</code>;</li>
-  <li>the frame was never appended to the stream, so no peer will ever see it;</li>
-  <li>the buffer is still full, so the <em>next</em> write takes the same branch and raises again.</li>
-</ul>
+<p>The local mutation now lives inside <code>append_update</code>, which owns the publish. It
+snapshots what it is replacing, applies the change, and puts it back if the dump does not
+happen:</p>
 
-<p>The dict is now permanently wedged for writes and silently divergent between processes. This
-is not a transient error you can retry.</p>
+<pre><code>had_key  = key in self.data
+old_item = self.data.get(key)
+...
+try:
+    self.dump()
+except Exception:
+    if had_key:
+        self.data.__setitem__(key, old_item)
+    else:
+        self.data.pop(key, None)
+    raise</code></pre>
+
+<p>The snapshot is taken <em>after</em> the branch's own <code>apply_update()</code>, so it
+reflects what peers see rather than a pre-reload guess, and <code>dump()</code> raises before
+writing a single remote byte. So the failure is now atomic: the write either lands everywhere
+or nowhere.</p>
+
+<p><strong>It also self-heals.</strong> Because <code>dump()</code> serializes
+<code>self.data</code> after the speculative mutation, a <code>del</code> dumps the
+<em>reduced</em> dict — so deleting your way out of a full dict works. What does not recover is
+a dict that exceeds <code>full_dump_size</code> even at its smallest: that keeps raising on
+every mutation. But the dict stays consistent while stuck, and reads keep working.</p>
 
 <figure>
   <div class="diagram" data-idx="1">
@@ -445,31 +466,30 @@ is not a transient error you can retry.</p>
 flowchart TD
     A["__setitem__"] --> B["append_update serializes frame"]
     B --> C{"frame fits in buffer?"}
-    C -->|yes| D["write frame, bump position"]
+    C -->|yes| D["apply locally, write frame, bump position"]
     D --> E["peers see it"]
-    C -->|no| F["set self.data locally"]
+    C -->|no| F["snapshot old value, apply locally"]
     F --> G["dump serializes whole dict"]
     G --> H{"dict fits in dump memory?"}
     H -->|yes| I["publish dump, reset position"]
     I --> E
-    H -->|no| J["raise FullDumpMemoryFull"]
-    J --> K["local data has the item"]
-    J --> L["peers never see it"]
-    J --> M["buffer still full, next write repeats"]
+    H -->|no| J["restore the snapshot"]
+    J --> K["raise FullDumpMemoryFull"]
+    K --> L["local copy matches peers"]
     </pre>
   </div>
-  <figcaption>The torn state after FullDumpMemoryFull. The two right-hand leaves are the divergence.</figcaption>
+  <figcaption>The write either lands everywhere or nowhere. The snapshot is taken after apply_update, so it matches what peers see.</figcaption>
 </figure>
 
 <div class="facts">
   <dl>
-    <dt>Symptom</dt><dd><code>UltraDict2.Exceptions.FullDumpMemoryFull</code> on a write, then on every subsequent write.</dd>
+    <dt>Symptom</dt><dd><code>UltraDict2.Exceptions.FullDumpMemoryFull</code> on the write that did not fit. The write is rolled back, so nothing is lost or hidden.</dd>
     <dt>Metric</dt><dd><code>full_dump_memory_full_total</code> non-zero. Watch <code>item_size_bytes_sum</code> against <code>full_dump_size_bytes</code> to see it coming.</dd>
-    <dt>Fix</dt><dd>Size <code>full_dump_size</code> for the largest dict you will ever hold, not the current one. On Linux, prefer omitting it entirely so dumps size themselves.</dd>
+    <dt>Fix</dt><dd>Delete something, or size <code>full_dump_size</code> for the largest dict you will ever hold rather than the current one. On Linux, prefer omitting it entirely so dumps size themselves.</dd>
   </dl>
 </div>
 
-<h2><span class="num">§3</span>The system runs out of shared memory <span class="verdict v-bad">Unwrapped</span></h2>
+<h2><span class="num">§3</span>The system runs out of shared memory <span class="verdict v-warn">Typed</span></h2>
 
 <p>With no static <code>full_dump_size</code>, every dump allocates a brand-new segment sized to
 fit, then unlinks the previous one:</p>
@@ -484,11 +504,23 @@ means a process that dies between those two lines leaks the old segment permanen
 reclaims it: <code>/dev/shm</code> entries survive the process that made them. Repeat that under
 a crash loop and tmpfs fills.</p>
 
-<p>When it does, <code>SharedMemory(create=True, ...)</code> at <code>:661</code> raises a plain
-<code>OSError</code> with <code>errno 28</code>. UltraDict2 does not catch or wrap it — it only
-handles <code>FileExistsError</code> and <code>FileNotFoundError</code>. So at the API level,
-"the machine is out of shared memory" is indistinguishable from any other OS error, and it
-surfaces from an ordinary-looking <code>d[k] = v</code>.</p>
+<p>When it does, <code>SharedMemory(create=True, ...)</code> raises a plain <code>OSError</code>.
+That used to escape unwrapped, making "the machine is out of shared memory" indistinguishable
+from any other OS error — arriving from an ordinary-looking <code>d[k] = v</code>. It is now
+caught and re-raised as <code>Exceptions.CannotCreateSharedMemory</code>, with a message naming
+the actual remedies and the original error kept as <code>__cause__</code>.</p>
+
+<p>Note the filter is the exception <em>type</em>, not the errno. Errno is not dependable here:
+an exhausted Windows paging file reports <code>EINVAL</code>, not <code>ENOSPC</code>, so an
+errno allowlist would miss the most likely real failure. Since
+<code>SharedMemory(create=True)</code> can only fail for host-resource reasons or a name
+collision, and the collision is handled separately, catching every <code>OSError</code> at that
+call <em>is</em> the precise filter.</p>
+
+<p><code>OverflowError</code> is caught alongside it. On a 32-bit build a size beyond
+<code>ssize_t</code> is rejected by <code>mmap</code> before the OS is ever asked — the segment
+still cannot be created, and reporting that as an arithmetic error from deep inside
+<code>mmap</code> tells the caller nothing useful.</p>
 
 <figure>
   <div class="diagram" data-idx="2">
@@ -501,7 +533,7 @@ flowchart TD
     B -.->|"process dies here"| E["previous segment leaked"]
     E --> F["tmpfs usage grows"]
     F --> G["shm_open returns ENOSPC"]
-    G --> H["raw OSError from __setitem__"]
+    G --> H["CannotCreateSharedMemory from __setitem__"]
     </pre>
   </div>
   <figcaption>The leak window. Default tmpfs is half of RAM, so this takes a while to bite and then bites everything on the host.</figcaption>
@@ -509,31 +541,44 @@ flowchart TD
 
 <div class="facts">
   <dl>
-    <dt>Symptom</dt><dd><code>OSError: [Errno 28] No space left on device</code> from a dict write. Other processes on the host fail too, not just yours.</dd>
+    <dt>Symptom</dt><dd><code>CannotCreateSharedMemory</code> from a dict write, wrapping the host's <code>OSError</code>. Other processes on the host fail too, not just yours.</dd>
     <dt>Metric</dt><dd><code>shm_free_bytes</code> trending down and not recovering. Alert well before zero.</dd>
     <dt>Fix</dt><dd>Find the orphans: <code>ls -la /dev/shm</code>. Anything matching your dict names with no owning process is leaked and can be removed with <code>UltraDict.unlink_by_name(name, ignore_errors=True)</code>.</dd>
   </dl>
 </div>
 
-<h2><span class="num">§4</span>Readers cannot keep up <span class="verdict v-warn">Recovers, unboundedly</span></h2>
+<h2><span class="num">§4</span>Readers cannot keep up <span class="verdict v-warn">Bounded, then typed</span></h2>
 
 <p>Nothing is exhausted here. The buffer is being recycled faster than a slow reader can replay
 it. Readers replay the stream <em>without</em> a lock, so a dump can reset the buffer under a
-reader mid-replay. Two guards catch it, and both recover the same way: by starting over.</p>
+reader mid-replay. Two guards catch it, and both recover by starting over.</p>
 
-<pre><code># apply_update, on a corrupted read
-if self.full_dump_counter &lt; remote_counter:                 # :925 and :932
-    log.warning("Full dumps too fast ... Consider increasing buffer_size.")
-    return self.apply_update()
+<p>Those retries used to be unbounded. A reader that could never catch up recursed until
+<code>RecursionError</code> — raised from an ordinary <code>d['x']</code>, <code>len(d)</code> or
+iteration, since all of them enter <code>apply_update()</code>. Both paths now carry a retry
+count, following the bounded pattern <code>get_full_dump_memory()</code> already used: three
+lock-free attempts, then a final one <em>under the lock</em>, so the last try is exclusive
+rather than another dice roll.</p>
 
-# load, when the dump we were reading got unlinked under us
-if full_dump_delta &gt; 1:                                     # :824
-    return self.load(force=True)</code></pre>
+<pre><code>if retry &lt; max_retry:
+    return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+elif retry == max_retry:
+    # On the last retry, take the lock so nobody can dump while we read
+    with self.lock:
+        return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+raise Exceptions.FullDumpsTooFast(...)</code></pre>
 
-<p>Both are unbounded recursion. If the writer keeps dumping faster than the reader can finish a
-reload, the reader recurses until it hits <code>RecursionError</code>. A <code>TODO</code> in
-<code>load()</code> acknowledges this. In practice the warning is the signal: it means you are
-one sustained burst away from a reader crashing.</p>
+<p>The recursion is deliberately kept rather than rewritten as a loop: the final
+<code>apply_update</code> retry runs while holding the lock, and a <code>continue</code> would
+release it before retrying, quietly deleting that guarantee.</p>
+
+<p>One subtlety worth knowing if you touch this code: <code>FullDumpsTooFast</code> must
+<strong>not</strong> subclass <code>AssertionError</code>. <code>CorruptedStream</code> does,
+precisely so the recovery handlers catch it — so a give-up signal that also inherited from
+<code>AssertionError</code> would be caught by the very handlers raising it and retried forever.
+The fix for infinite recursion would itself recurse infinitely.</p>
+
+<p>The warning is still the leading signal: it means you are close to the bound.</p>
 
 <figure>
   <div class="diagram" data-idx="3">
@@ -550,17 +595,18 @@ sequenceDiagram
     W->>C: dump again, counter += 1
     R->>R: unpickle garbage, CorruptedStream
     R->>C: counter moved, so recover
-    R->>R: apply_update again from the top
+    R->>R: apply_update again, retry 1 of 3
     Note over R: writer may have dumped again already
-    R->>R: recursion continues until it catches up
+    R->>R: final retry runs under the lock
+    R->>R: still behind, raise FullDumpsTooFast
     </pre>
   </div>
-  <figcaption>Recovery is correct but has no depth bound. Sustained dump pressure ends in RecursionError.</figcaption>
+  <figcaption>Three lock-free retries, then one exclusive attempt under the lock, then a named error instead of a blown stack.</figcaption>
 </figure>
 
 <div class="facts">
   <dl>
-    <dt>Symptom</dt><dd>Repeated <code>Full dumps too fast</code> warnings in reader logs. Eventually <code>RecursionError</code> or an escaping <code>CorruptedStream</code>.</dd>
+    <dt>Symptom</dt><dd>Repeated <code>Full dumps too fast</code> warnings in reader logs, then <code>FullDumpsTooFast</code> from an ordinary read once the retries are spent.</dd>
     <dt>Metric</dt><dd><code>full_dump_too_fast_total</code> climbing on readers, correlated with <code>buffer_full_forced_dump_total</code> on the writer.</dd>
     <dt>Fix</dt><dd>Raise <code>buffer_size</code> to cut the dump rate, or make readers poll more often so they have less to replay.</dd>
   </dl>
@@ -607,12 +653,12 @@ multiple on Windows, so <code>buffer_size=10_000</code> reports as 12288.</p>
     <tr>
       <td>§3 System shm exhausted</td>
       <td><code>shm_free_bytes</code> trending down</td>
-      <td>Raw <code>OSError</code>, errno 28. No metric.</td>
+      <td><code>CannotCreateSharedMemory</code></td>
     </tr>
     <tr>
       <td>§4 Reader starvation</td>
-      <td><code>full_dump_total</code> rate</td>
-      <td><code>full_dump_too_fast_total</code></td>
+      <td><code>full_dump_too_fast_total</code> rising</td>
+      <td><code>FullDumpsTooFast</code></td>
     </tr>
   </tbody>
 </table>
@@ -621,23 +667,69 @@ multiple on Windows, so <code>buffer_size=10_000</code> reports as 12288.</p>
 <p>All of these come from <code>ultra.get_metrics()</code>. See the Metrics section of the
 readme for the Prometheus collector.</p>
 
-<h2><span class="num">§7</span>What is not fixed</h2>
+<h2><span class="num">§7</span>Sizing the buffer, with numbers</h2>
 
-<p>This document describes behaviour, it does not change it. Three things are worth fixing and
-are deliberately out of scope here:</p>
+<p><code>tests/performance/buffer_size_sweep.py</code> sweeps <code>buffer_size</code> against a
+fixed payload and write pattern. Measured on a 100 KB dict in 200 keys, 2000 writes of 50 bytes,
+one reader following along:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>buffer_size</th><th>writes/sec</th><th>dumps/1k writes</th><th>buffer used</th><th>amplification</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">4,096</td><td class="mono">65,650</td><td class="mono">20.0</td><td class="mono">0.0%</td><td class="mono">16.1x</td></tr>
+    <tr><td class="mono">16,384</td><td class="mono">97,708</td><td class="mono">5.0</td><td class="mono">46.0%</td><td class="mono">4.0x</td></tr>
+    <tr><td class="mono">65,536</td><td class="mono">119,055</td><td class="mono">1.5</td><td class="mono">14.4%</td><td class="mono">1.2x</td></tr>
+    <tr><td class="mono">262,144</td><td class="mono">125,654</td><td class="mono">0.5</td><td class="mono">3.8%</td><td class="mono">0.4x</td></tr>
+    <tr><td class="mono">1,048,576</td><td class="mono">131,191</td><td class="mono">0.0</td><td class="mono">25.9%</td><td class="mono">0.0x</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Amplification is bytes moved per byte of real change, counting the writer only — multiply by
+the number of reader processes. The knee is at 64 KiB for this shape: the undersized buffer moves
+<strong>16x more bytes than the change is worth</strong> and runs at 45% of the throughput.</p>
+
+<p>Read the third column carefully. <strong>The worst row reports the buffer as 0.0% used.</strong>
+A buffer too small resets on every dump, so it looks idle exactly when it is thrashing.
+<code>buffer_used_fraction</code> is only meaningful once the buffer is adequate — alert on
+<code>buffer_full_forced_dump_total</code> instead.</p>
+
+<div class="facts">
+  <dl>
+    <dt>Floor</dt><dd><code>buffer_size</code> must exceed <code>item_size_bytes_max</code> plus six bytes, or every single write dumps.</dd>
+    <dt>Above that</dt><dd>It is a keyframe-interval choice: roughly <code>writes_between_acceptable_dumps × avg_frame_size</code>.</dd>
+    <dt>Caveat</dt><dd>Writer and reader share one thread in the sweep, so ops/sec is indicative; the dump and reload counts are exact. Run against the pure-Python module, not the Cython build — compare rows within one run, never across runs.</dd>
+  </dl>
+</div>
+
+<h2><span class="num">§8</span>What is still not fixed</h2>
+
+<p>Three known gaps remain, each deliberately out of scope so far:</p>
 
 <ol>
-  <li>The <code>OSError</code> from §3 should be wrapped in a dedicated exception so callers can
-  distinguish "host out of shared memory" from any other <code>OSError</code>.</li>
-  <li>The recursion in §4 should carry a depth bound and fail with a clear error rather than
-  <code>RecursionError</code>.</li>
-  <li>The torn state in §2 should be repaired: the local <code>data</code> mutation should be
-  rolled back, or applied only after the dump succeeds.</li>
+  <li><strong>The recurse-mode child leak.</strong> With <code>recurse=True</code>, assigning a
+  nested <code>dict</code> builds a child UltraDict — creating shared segments and registering
+  its name — before the parent's own write is published. If that write then fails, the child
+  segment and its registry entry persist. Unwinding them would mean unlinking a segment a peer
+  may already have attached to, so doing nothing is the safer bug. The leak is bounded:
+  <code>unlink_recursed()</code> sweeps the register when the parent closes.</li>
+
+  <li><strong><code>update()</code> is not atomic across keys.</strong> It loops
+  <code>self[k] = v</code>, publishing each key separately, so a failure part-way leaves earlier
+  keys visible to peers. Individual keys are never torn — only the batch. Real batch atomicity
+  needs a multi-key frame format.</li>
+
+  <li><strong>The name-then-counter publish window in <code>dump()</code>.</strong> The new
+  segment's name is written to the control block before the dump counter is incremented, so
+  there is a brief window advertising a new segment under the old generation. The file's own
+  <code>TODO</code> flags it.</li>
 </ol>
 
 <footer>
-  Behaviour described against <code>UltraDict2/UltraDict2.py</code> on branch
-  <code>feat/metrics</code>. Line numbers drift; the control flow is the durable part.
+  Behaviour and sweep figures measured against <code>UltraDict2/UltraDict2.py</code> after the
+  memory-exhaustion fixes. Numbers are one machine and one payload shape; the control flow is the
+  durable part.
 </footer>
 
 </div>
