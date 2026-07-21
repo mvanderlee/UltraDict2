@@ -125,6 +125,72 @@ class UltraDictTests(unittest.TestCase):
         self.assertEqual(metrics.buffer_full_forced_dump_total, 1)
         self.assertEqual(metrics.full_dump_total, 0)
 
+    def test_full_dump_memory_full_rolls_back(self):
+        """A write that could not be published must not survive in the local copy."""
+        ultra = UltraDict(buffer_size=4096, full_dump_size=4096)
+
+        # Sized from the segment, not the request: the OS rounds up to a page, which is
+        # 16 KiB on Apple Silicon
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            ultra['huge'] = ' ' * (ultra.full_dump_memory.size * 2)
+
+        self.assertNotIn('huge', ultra.data)
+        self.assertEqual(len(ultra), 0)
+
+        # Not wedged either: a value that does fit still gets through afterwards
+        ultra['small'] = 1
+
+        other = UltraDict(name=ultra.name)
+        self.assertEqual(other.data, {'small': 1})
+
+    def test_full_dump_memory_full_rolls_back_delete(self):
+        """A delete that could not be published must not vanish from the local copy."""
+        import pickle
+
+        # 65536 is a whole number of pages on every platform, so the buffer really is
+        # the size we asked for
+        ultra = UltraDict(buffer_size=65536, full_dump_size=4096)
+
+        key = 'k' * 3000
+        ultra[key] = 1
+        # Big enough that what is left after the delete still cannot be dumped
+        ultra['pad'] = 'p' * (ultra.full_dump_memory.size * 2)
+
+        # Fill until a delete frame no longer fits. Every filler is far smaller than the
+        # delete frame, so a filler can never be the write that overflows.
+        delete_frame = len(pickle.dumps((False, key, b''))) + 6
+        filler = 0
+        while ultra.get_metrics().buffer_used_bytes + delete_frame <= ultra.buffer_size:
+            ultra[f'fill{filler}'] = 'x' * 150
+            filler += 1
+
+        # Precondition: the setup itself never dumped, so the delete below is the write
+        # that overflows. Fails loudly here rather than silently testing nothing.
+        self.assertEqual(ultra.full_dump_counter, 0)
+        before = len(ultra.data)
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            del ultra[key]
+
+        self.assertIn(key, ultra.data)
+        self.assertEqual(len(ultra.data), before)
+
+    def test_metrics_ignore_failed_writes(self):
+        """A write that never landed is not an observation."""
+        ultra = UltraDict(buffer_size=4096, full_dump_size=4096)
+        ultra['a'] = 1
+        before = ultra.get_metrics()
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpMemoryFull):
+            ultra['huge'] = ' ' * (ultra.full_dump_memory.size * 2)
+
+        after = ultra.get_metrics()
+        self.assertEqual(after.item_size_observations_total, before.item_size_observations_total)
+        self.assertEqual(after.item_size_bytes_sum, before.item_size_bytes_sum)
+        self.assertEqual(after.item_size_bytes_max, before.item_size_bytes_max)
+        # The failure itself is still counted
+        self.assertEqual(after.full_dump_memory_full_total, 1)
+
     def test_parameter_passing(self):
         ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`

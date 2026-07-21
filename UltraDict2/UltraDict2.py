@@ -1004,13 +1004,6 @@ class UltraDict(collections.UserDict, dict):
         marshalled = self.serializer.dumps((not delete, key, item))
         length = len(marshalled)
 
-        self.item_size_sum += length
-        self.item_size_count += 1
-        if self.item_size_min is None or length < self.item_size_min:
-            self.item_size_min = length
-        if self.item_size_max is None or length > self.item_size_max:
-            self.item_size_max = length
-
         with self.lock:
             start_position = int.from_bytes(self.update_stream_position_remote, 'little')
             # 6 bytes for the header
@@ -1022,20 +1015,53 @@ class UltraDict(collections.UserDict, dict):
 
                 # todo: is is necessary? apply_update() is also done inside dump()
                 self.apply_update()
-                if not delete:
+
+                # Nothing goes to the stream on this path, dump() publishes self.data
+                # instead, so the change has to be applied before dumping. Snapshot what
+                # we are replacing first, taken after apply_update() so it matches what
+                # our peers see, and put it back if the dump does not happen: a change
+                # kept only in our own copy is one no peer will ever hear about.
+                had_key = key in self.data
+                old_item = self.data.get(key)
+                if delete:
+                    self.data.__delitem__(key)
+                else:
                     self.data.__setitem__(key, item)
-                self.dump()
-                return
 
-            marshalled = b'\xff' + length.to_bytes(4, 'little') + b'\xff' + marshalled
+                try:
+                    self.dump()
+                except Exception:
+                    if had_key:
+                        self.data.__setitem__(key, old_item)
+                    else:
+                        self.data.pop(key, None)
+                    raise
+            else:
+                # Applied before publishing: the buffer write below is a bounds-checked
+                # slice assignment that cannot fail, while an unhashable key must still
+                # fail here rather than emit a frame every peer would choke on
+                if delete:
+                    self.data.__delitem__(key)
+                else:
+                    self.data.__setitem__(key, item)
 
-            # Write body with the real data
-            self.buffer.buf[start_position:end_position] = marshalled
+                marshalled = b'\xff' + length.to_bytes(4, 'little') + b'\xff' + marshalled
 
-            # Inform others about it
-            self.update_stream_position = end_position
-            self.update_stream_position_remote[:] = end_position.to_bytes(4, 'little')
-            # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
+                # Write body with the real data
+                self.buffer.buf[start_position:end_position] = marshalled
+
+                # Inform others about it
+                self.update_stream_position = end_position
+                self.update_stream_position_remote[:] = end_position.to_bytes(4, 'little')
+                # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
+
+            # Only writes that actually landed are worth measuring
+            self.item_size_sum += length
+            self.item_size_count += 1
+            if self.item_size_min is None or length < self.item_size_min:
+                self.item_size_min = length
+            if self.item_size_max is None or length > self.item_size_max:
+                self.item_size_max = length
 
     # @profile
     def apply_update(self, max_retry=3, retry=0):
@@ -1127,11 +1153,12 @@ class UltraDict(collections.UserDict, dict):
         with self.lock:
             self.apply_update()
 
-            # Update our local copy
-            self.data.__delitem__(key)
+            # Fail before publishing, or peers replay a delete for a key nobody has
+            if key not in self.data:
+                raise KeyError(key)
 
+            # append_update() updates our local copy once the change is published
             self.append_update(key, b'', delete=True)
-            # TODO: Do something if append_update() fails
 
     def __setitem__(self, key, item):
         # log.debug("__setitem__ {}, {}", key, item)
@@ -1157,13 +1184,8 @@ class UltraDict(collections.UserDict, dict):
                     if item.name not in self.recurse_register.data:
                         self.recurse_register[item.name] = True
 
-            # Update our local copy
-            # It's important for the integrity to do this first
-            self.data.__setitem__(key, item)
-
-            # Append the update to the update stream
+            # Append the update to the update stream, which also updates our local copy
             self.append_update(key, item)
-            # TODO: Do something if append_u int.from_bytes(self.update_stream_position_remote, 'little')pdate() fails
 
     def __getitem__(self, key):
         # log.debug("__getitem__ {}", key)
