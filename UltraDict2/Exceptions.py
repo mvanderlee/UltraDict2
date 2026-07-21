@@ -64,6 +64,17 @@ class FullDumpMemoryFull(Exception):
     pass
 
 
+class FullDumpsTooFast(Exception):
+    """Raised when a reader keeps losing the race against new full dumps.
+
+    Deliberately not an AssertionError: the recovery paths catch AssertionError,
+    so a give-up signal that subclassed it would be caught by the very handlers
+    raising it and retried forever.
+    """
+
+    pass
+
+
 class CorruptedStream(AssertionError):
     """Raised when the update stream or a full dump contains invalid data.
 

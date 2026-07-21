@@ -926,7 +926,7 @@ class UltraDict(collections.UserDict, dict):
                 raise e
 
     # @profile
-    def load(self, force=False):
+    def load(self, force=False, max_retry=3, retry=0):
         """
         Opportunistacally load full dumps without any locking.
 
@@ -979,8 +979,18 @@ class UltraDict(collections.UserDict, dict):
             if full_dump_delta > 1:
                 # If more than one new full dump was created during the time we were trying to load one full dump
                 # it can happen that our full dump has just disappeared
-                return self.load(force=True)
-            # TODO: Before we reach max recursion depth, try to load the full dump using a lock
+                if retry < max_retry:
+                    return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+                elif retry == max_retry:
+                    # On the last retry, take the lock so nobody can dump while we read
+                    with self.lock:
+                        return self.load(force=True, max_retry=max_retry, retry=retry + 1)
+                raise Exceptions.FullDumpsTooFast(
+                    f"Full dumps too fast, gave up loading after {max_retry} retries "
+                    f"full_dump_counter={self.full_dump_counter} "
+                    f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                    "Consider increasing buffer_size."
+                )
             self.print_status()
             raise e
 
@@ -1028,8 +1038,16 @@ class UltraDict(collections.UserDict, dict):
             # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
 
     # @profile
-    def apply_update(self):
+    def apply_update(self, max_retry=3, retry=0):
         """Opportunistically apply dict changes from shared memory stream without any locking."""
+
+        if retry > max_retry:
+            raise Exceptions.FullDumpsTooFast(
+                f"Full dumps too fast, gave up applying updates after {max_retry} retries "
+                f"full_dump_counter={self.full_dump_counter} "
+                f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                "Consider increasing buffer_size."
+            )
 
         if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
             self.load(force=True)
@@ -1069,7 +1087,7 @@ class UltraDict(collections.UserDict, dict):
                 # a lock; frames we just applied could then be stale. Detect it via the
                 # dump counter (always incremented before the stream reset) and reload.
                 if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
-                    return self.apply_update()
+                    return self.apply_update(max_retry=max_retry, retry=retry + 1)
             except (AssertionError, pickle.UnpicklingError) as e:
                 # It can happen that a slow process is not fast enough reading the stream and some
                 # other process already got around overwriting the current position. It is possible to
@@ -1079,7 +1097,7 @@ class UltraDict(collections.UserDict, dict):
                         f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                     )
                     self.full_dump_too_fast += 1
-                    return self.apply_update()
+                    return self.apply_update(max_retry=max_retry, retry=retry + 1)
 
                 # As a last resort, let's get a lock. This way we are safe but slow.
                 with self.lock:
@@ -1088,7 +1106,7 @@ class UltraDict(collections.UserDict, dict):
                             f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
                         )
                         self.full_dump_too_fast += 1
-                        return self.apply_update()
+                        return self.apply_update(max_retry=max_retry, retry=retry + 1)
 
                 raise e
 

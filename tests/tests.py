@@ -195,6 +195,47 @@ class UltraDictTests(unittest.TestCase):
                 # The original stays reachable, so errno and winerror can still be read
                 self.assertIsInstance(ctx.exception.__cause__, (OSError, OverflowError))
 
+    def test_full_dumps_too_fast_is_bounded(self):
+        """A reader that can never catch up gives up typed, instead of recursing until the stack ends."""
+        ultra = UltraDict()
+
+        # What a reader sees when dumps outrun it: a counter it can never reach
+        ultra.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+            ultra.apply_update()
+
+    def test_full_dumps_too_fast_respects_max_retry(self):
+        """The bound is a parameter, not a hardcoded recursion depth."""
+        ultra = UltraDict()
+        ultra.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+            ultra.load(force=True, max_retry=0)
+
+    def test_apply_update_threads_the_retry_count(self):
+        """Every apply_update() recursion must carry the retry count, or the bound never bites."""
+        writer = UltraDict()
+        writer['a'] = 1
+
+        reader = UltraDict(name=writer.name)
+        # Behind on the stream, and behind on dumps we can never load
+        reader.update_stream_position = 0
+        reader.full_dump_counter_remote[:] = (1000).to_bytes(4, 'little')
+
+        # Stub load() the way a real one behaves except for closing the counter gap: it
+        # rewinds the stream, so every attempt replays and then finds itself stale again.
+        # That models a dump that was already superseded by the time we loaded it.
+        def rewind(*args, **kwargs):
+            reader.update_stream_position = 0
+
+        with mock.patch.object(reader, 'load', side_effect=rewind):
+            with self.assertRaises(UltraDict.Exceptions.FullDumpsTooFast):
+                reader.apply_update()
+
+            # One attempt per retry, then the guard fires before a fifth
+            self.assertEqual(reader.load.call_count, 4)
+
     def test_lock_blocking(self):
         pass
 
