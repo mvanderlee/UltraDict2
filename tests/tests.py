@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from UltraDict2 import UltraDict
@@ -245,15 +246,17 @@ class UltraDictTests(unittest.TestCase):
         ultra = UltraDict(shared_lock=True)
         ultra.lock.lock_remote[0:1] = b'\x01'
 
-        def touch_lock_time():
+        # The activity is injected into the watch loop's own sleep rather than raced in
+        # from a timer thread: a timer has to win against a 100ms watch, and on a loaded
+        # runner it can lose, failing the test for scheduling reasons rather than logic.
+        real_sleep = time.sleep
+
+        def touch_lock_time_while_watching(seconds):
+            real_sleep(seconds)
             ultra.lock.lock_time_remote[:] = int(time.time() * 1000).to_bytes(8, 'little')
 
-        timer = threading.Timer(0.02, touch_lock_time)
-        timer.start()
-        try:
+        with mock.patch.object(time, 'sleep', touch_lock_time_while_watching):
             self.assertFalse(ultra.lock.steal_from_dead(from_pid=0))
-        finally:
-            timer.join()
         self.assertEqual(ultra.lock.get_remote_lock(), 1, "lock must be left untouched")
 
     def _sized_probe(self, path):
@@ -270,7 +273,6 @@ class UltraDictTests(unittest.TestCase):
     def test_wait_until_sized_waits_for_the_creator(self):
         """A segment with no size yet is waited on, not attached to."""
         import tempfile
-        import threading
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, 'segment')
@@ -348,7 +350,6 @@ class UltraDictTests(unittest.TestCase):
         segment having been destroyed.
         """
         import _posixshmem
-        import threading
 
         name = 'ultra_unsized_segment'
         try:
