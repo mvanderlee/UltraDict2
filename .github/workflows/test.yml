@@ -4,7 +4,17 @@ on:
   push:
     branches:
       - main
+    # Docs and benchmarks ship no importable code, so a change to them alone cannot
+    # break the suite or the wheels. Keep this list in sync with the pull_request one.
+    paths-ignore:
+      - 'readme.md'
+      - 'docs/**'
+      - 'tests/performance/**'
   pull_request:
+    paths-ignore:
+      - 'readme.md'
+      - 'docs/**'
+      - 'tests/performance/**'
   workflow_dispatch:
 
 jobs:
