@@ -183,6 +183,18 @@ class UltraDictTests(unittest.TestCase):
         with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
             ultra = UltraDict(name=name, create=False)
 
+    def test_cannot_create_shared_memory_is_typed(self):
+        """A size no host can back reports as our own error, whatever the platform raises."""
+        # 2**48 is past the user address space on 64 bit, and past ssize_t on 32 bit, where
+        # mmap rejects it as OverflowError before the OS ever sees it
+        for size in (2**48, 2**64):
+            with self.subTest(size=size):
+                with self.assertRaises(UltraDict.Exceptions.CannotCreateSharedMemory) as ctx:
+                    UltraDict.get_memory(create=True, size=size)
+
+                # The original stays reachable, so errno and winerror can still be read
+                self.assertIsInstance(ctx.exception.__cause__, (OSError, OverflowError))
+
     def test_lock_blocking(self):
         pass
 

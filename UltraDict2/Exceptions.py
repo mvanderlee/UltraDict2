@@ -25,6 +25,16 @@ class CannotAttachSharedMemory(Exception):
     pass
 
 
+class CannotCreateSharedMemory(Exception):
+    """Raised when the host cannot back another shared memory segment.
+
+    The original OSError is kept as __cause__; errno is not reliable across
+    platforms, so inspect it there rather than branching on the type.
+    """
+
+    pass
+
+
 class CannotAcquireLock(Exception):
     def __init__(self, *args, blocking_pid=0, timestamp=None, **kwargs):
         super().__init__('Cannot acquire lock', *args)

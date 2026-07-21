@@ -804,6 +804,19 @@ class UltraDict(collections.UserDict, dict):
                         raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists") from None
                     # We lost the creation race against another process; attach instead
                     continue
+                except (OSError, OverflowError) as e:
+                    # Anything other than the collision above means the host could not back
+                    # the segment. Errno is not dependable here: an exhausted Windows paging
+                    # file reports EINVAL, not ENOSPC, so the type is the filter. OverflowError
+                    # joins it because a size beyond ssize_t never reaches the OS at all: on a
+                    # 32-bit build mmap rejects it, which is a host limit like any other.
+                    raise Exceptions.CannotCreateSharedMemory(
+                        f"Cannot create shared memory of {size} bytes: {e}. The host is out of shared "
+                        "memory or file descriptors. On Linux, grow /dev/shm (eg. `docker run "
+                        "--shm-size=1g`) or look for segments left behind by crashed processes; on "
+                        "Windows, grow the paging file. Setting full_dump_size stops a new segment "
+                        "being allocated for every dump."
+                    ) from e
                 # Remember that we have created this memory
                 memory.created_by_ultra = True
                 # log.debug('Created shared memory: ', memory.name)
