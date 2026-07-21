@@ -709,6 +709,16 @@ class UltraDict(collections.UserDict, dict):
         self.lock_time_remote = self.control.buf[275:283]
         self.ready_remote = self.control.buf[283:284]
 
+        # int.from_bytes() on a memoryview copies it into a temporary bytes object on
+        # every call, and the read path pays that twice before it can answer whether
+        # anything changed. A cast view reads the same four bytes without copying.
+        # These two use native byte order rather than the explicit little endian used
+        # elsewhere, which is safe because they are only ever read and written through
+        # these views and shared memory never leaves the machine. Element access goes
+        # through memcpy, so the unaligned offset of the counter is fine.
+        self.update_stream_position_int_remote = self.update_stream_position_remote.cast('I')
+        self.full_dump_counter_int_remote = self.full_dump_counter_remote.cast('I')
+
     def del_remotes(self):
         """
         Delete all instance attributes whose name ends with '_remote' from
@@ -878,17 +888,17 @@ class UltraDict(collections.UserDict, dict):
                 self.full_dump_memory_name_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
 
             self.full_dump_length = length
-            current = int.from_bytes(self.full_dump_counter_remote, 'little')
+            current = self.full_dump_counter_int_remote[0]
             # Remote first: raising in between with only the local counter bumped would put
             # us permanently ahead of everyone, and every reload guard compares local against
             # remote, so this instance would stop seeing peer updates for good
-            self.full_dump_counter_remote[:] = int(current + 1).to_bytes(4, 'little')
+            self.full_dump_counter_int_remote[0] = current + 1
             self.full_dump_counter += 1
 
             # Reset the stream position to zero as we have
             # just provided a fresh new full dump
             self.update_stream_position = 0
-            self.update_stream_position_remote[:] = b'\x00\x00\x00\x00'
+            self.update_stream_position_int_remote[0] = 0
 
             # log.info("Dumped dict with {} elements to {} bytes, remote_counter={}", len(self), len(marshalled), current+1)
 
@@ -938,7 +948,7 @@ class UltraDict(collections.UserDict, dict):
         There is a rare case where a full dump is replaced with a newer full dump while
         we didn't have the chance to load the old one. In this case, we just retry.
         """
-        full_dump_counter = int.from_bytes(self.full_dump_counter_remote, 'little')
+        full_dump_counter = self.full_dump_counter_int_remote[0]
         # log.debug("Loading full dump local_counter={} remote_counter={}", self.full_dump_counter, full_dump_counter)
         try:
             if force or (self.full_dump_counter < full_dump_counter):
@@ -980,7 +990,7 @@ class UltraDict(collections.UserDict, dict):
             else:
                 raise Exception("Cannot load full dump, no new data available")
         except AssertionError as e:
-            full_dump_delta = int.from_bytes(self.full_dump_counter_remote, 'little') - self.full_dump_counter
+            full_dump_delta = self.full_dump_counter_int_remote[0] - self.full_dump_counter
             if full_dump_delta > 1:
                 # If more than one new full dump was created during the time we were trying to load one full dump
                 # it can happen that our full dump has just disappeared
@@ -993,7 +1003,7 @@ class UltraDict(collections.UserDict, dict):
                 raise Exceptions.FullDumpsTooFast(
                     f"Full dumps too fast, gave up loading after {max_retry} retries "
                     f"full_dump_counter={self.full_dump_counter} "
-                    f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                    f"full_dump_counter_remote={self.full_dump_counter_int_remote[0]}. "
                     "Consider increasing buffer_size."
                 )
             self.print_status()
@@ -1010,7 +1020,7 @@ class UltraDict(collections.UserDict, dict):
         length = len(marshalled)
 
         with self.lock:
-            start_position = int.from_bytes(self.update_stream_position_remote, 'little')
+            start_position = self.update_stream_position_int_remote[0]
             # 6 bytes for the header
             end_position = start_position + length + 6
             # log.debug("Update start from={} len={}", start_position, length)
@@ -1057,7 +1067,7 @@ class UltraDict(collections.UserDict, dict):
 
                 # Inform others about it
                 self.update_stream_position = end_position
-                self.update_stream_position_remote[:] = end_position.to_bytes(4, 'little')
+                self.update_stream_position_int_remote[0] = end_position
                 # log.debug("Update end to={} buffer_size={} ", end_position, self.buffer_size)
 
             # Only writes that actually landed are worth measuring
@@ -1076,21 +1086,21 @@ class UltraDict(collections.UserDict, dict):
             raise Exceptions.FullDumpsTooFast(
                 f"Full dumps too fast, gave up applying updates after {max_retry} retries "
                 f"full_dump_counter={self.full_dump_counter} "
-                f"full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. "
+                f"full_dump_counter_remote={self.full_dump_counter_int_remote[0]}. "
                 "Consider increasing buffer_size."
             )
 
-        if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
+        if self.full_dump_counter < self.full_dump_counter_int_remote[0]:
             self.load(force=True)
 
-        if self.update_stream_position < int.from_bytes(self.update_stream_position_remote, 'little'):
+        if self.update_stream_position < self.update_stream_position_int_remote[0]:
             # Remember start position in the update stream
             pos = self.update_stream_position
-            # log.debug("Apply update: stream position own={} remote={} full_dump_counter={}", pos, int.from_bytes(self.update_stream_position_remote, 'little'), self.full_dump_counter)
+            # log.debug("Apply update: stream position own={} remote={} full_dump_counter={}", pos, self.update_stream_position_int_remote[0], self.full_dump_counter)
 
             try:
                 # Iterate over all updates until the start of the last update
-                while pos < int.from_bytes(self.update_stream_position_remote, 'little'):
+                while pos < self.update_stream_position_int_remote[0]:
                     # Read header
                     # The first byte should be a FF byte to introduce the header
                     if bytes(self.buffer.buf[pos : pos + 1]) != b'\xff':
@@ -1117,24 +1127,24 @@ class UltraDict(collections.UserDict, dict):
                 # A dump() may have reset the stream while we were replaying it without
                 # a lock; frames we just applied could then be stale. Detect it via the
                 # dump counter (always incremented before the stream reset) and reload.
-                if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
+                if self.full_dump_counter < self.full_dump_counter_int_remote[0]:
                     return self.apply_update(max_retry=max_retry, retry=retry + 1)
             except (AssertionError, pickle.UnpicklingError) as e:
                 # It can happen that a slow process is not fast enough reading the stream and some
                 # other process already got around overwriting the current position. It is possible to
                 # recover from this situation if and only if a new, fresh full dump exists that can be loaded.
-                if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
+                if self.full_dump_counter < self.full_dump_counter_int_remote[0]:
                     log.warning(
-                        f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
+                        f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={self.full_dump_counter_int_remote[0]}. Consider increasing buffer_size."
                     )
                     self.full_dump_too_fast += 1
                     return self.apply_update(max_retry=max_retry, retry=retry + 1)
 
                 # As a last resort, let's get a lock. This way we are safe but slow.
                 with self.lock:
-                    if self.full_dump_counter < int.from_bytes(self.full_dump_counter_remote, 'little'):
+                    if self.full_dump_counter < self.full_dump_counter_int_remote[0]:
                         log.warning(
-                            f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={int.from_bytes(self.full_dump_counter_remote, 'little')}. Consider increasing buffer_size."
+                            f"Full dumps too fast full_dump_counter={self.full_dump_counter} full_dump_counter_remote={self.full_dump_counter_int_remote[0]}. Consider increasing buffer_size."
                         )
                         self.full_dump_too_fast += 1
                         return self.apply_update(max_retry=max_retry, retry=retry + 1)
@@ -1240,13 +1250,13 @@ class UltraDict(collections.UserDict, dict):
         """Internal debug helper to get the control state variables"""
         ret = {attr: getattr(self, attr) for attr in self.__slots__ if hasattr(self, attr) and attr != 'data'}
 
-        ret['update_stream_position_remote'] = int.from_bytes(self.update_stream_position_remote, 'little')
+        ret['update_stream_position_remote'] = self.update_stream_position_int_remote[0]
         ret['lock_pid_remote'] = int.from_bytes(self.lock_pid_remote, 'little')
         ret['lock_remote'] = int.from_bytes(self.lock_remote, 'little')
         ret['shared_lock_remote'] = self.shared_lock_remote[0:1] == b'1'
         ret['recurse_remote'] = self.recurse_remote[0:1] == b'1'
         ret['lock'] = self.lock
-        ret['full_dump_counter_remote'] = int.from_bytes(self.full_dump_counter_remote, 'little')
+        ret['full_dump_counter_remote'] = self.full_dump_counter_int_remote[0]
         ret['full_dump_memory_name_remote'] = bytes(self.full_dump_memory_name_remote).decode('utf-8').strip('\x00').strip()
 
         return ret
@@ -1265,7 +1275,7 @@ class UltraDict(collections.UserDict, dict):
         Like status(), this takes no lock and does not apply pending updates, so
         item_count reflects our last applied view of the dict.
         """
-        buffer_used = int.from_bytes(self.update_stream_position_remote, 'little')
+        buffer_used = self.update_stream_position_int_remote[0]
 
         # macOS is posix but has no /dev/shm, so check the directory, not the platform
         if os.path.isdir('/dev/shm'):
