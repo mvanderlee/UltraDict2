@@ -878,10 +878,12 @@ class UltraDict(collections.UserDict, dict):
                 self.full_dump_memory_name_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
 
             self.full_dump_length = length
-            self.full_dump_counter += 1
             current = int.from_bytes(self.full_dump_counter_remote, 'little')
-            # Now also increment the remote counter
+            # Remote first: raising in between with only the local counter bumped would put
+            # us permanently ahead of everyone, and every reload guard compares local against
+            # remote, so this instance would stop seeing peer updates for good
             self.full_dump_counter_remote[:] = int(current + 1).to_bytes(4, 'little')
+            self.full_dump_counter += 1
 
             # Reset the stream position to zero as we have
             # just provided a fresh new full dump
@@ -890,13 +892,16 @@ class UltraDict(collections.UserDict, dict):
 
             # log.info("Dumped dict with {} elements to {} bytes, remote_counter={}", len(self), len(marshalled), current+1)
 
-            # If the old full dump memory was dynamically created, delete it
-            if old and old != full_dump_memory.name and not self.full_dump_size:
-                self.unlink_by_name(old)
-
             # On Windows, we need to keep a reference to the full dump memory,
-            # otherwise it's destoryed
+            # otherwise it's destoryed. Taken before the unlink below, which can raise:
+            # without the reference that would destroy the dump we just published.
             self.full_dump_memory = full_dump_memory
+
+            # If the old full dump memory was dynamically created, delete it. The dump is
+            # already published at this point, so failing to reap the old segment costs a
+            # leaked segment and must not fail the write.
+            if old and old != full_dump_memory.name and not self.full_dump_size:
+                self.unlink_by_name(old, ignore_errors=True)
 
             return full_dump_memory
 

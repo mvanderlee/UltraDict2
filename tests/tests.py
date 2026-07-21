@@ -191,6 +191,17 @@ class UltraDictTests(unittest.TestCase):
         # The failure itself is still counted
         self.assertEqual(after.full_dump_memory_full_total, 1)
 
+    def test_dump_counter_never_leads_remote(self):
+        """A local counter ahead of the remote one would stop this instance ever reloading."""
+        ultra = UltraDict()
+        ultra['huge'] = ' ' * 1_000_000
+
+        self.assertEqual(ultra.full_dump_counter, 1)
+        self.assertLessEqual(
+            ultra.full_dump_counter,
+            int.from_bytes(ultra.full_dump_counter_remote, 'little'),
+        )
+
     def test_parameter_passing(self):
         ultra = UltraDict(shared_lock=True, buffer_size=4096 * 8, full_dump_size=4096 * 8)
         # Connect `other` dict to `ultra` dict via `name`
