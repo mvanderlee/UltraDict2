@@ -1,5 +1,10 @@
 # UltraDict2
 
+[![PyPI Package](https://img.shields.io/pypi/v/ultradict2.svg)](https://pypi.org/project/UltraDict2)
+[![Tests](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml)
+[![Python 3.11-3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/mvanderlee/UltraDict2.svg)](https://github.com/mvanderlee/UltraDict2/blob/main/LICENSE)
+
 Sychronized, streaming Python dictionary that uses shared memory as a backend
 
 This is a maintained fork of [ronny-rentner/UltraDict](https://github.com/ronny-rentner/UltraDict),
@@ -16,11 +21,6 @@ Features:
 * Tested with Python 3.11 - 3.14 on Linux, Windows and Mac
 * Convenient, no setter or getters necessary
 * Optional recursion for nested dicts
-
-[![PyPI Package](https://img.shields.io/pypi/v/ultradict2.svg)](https://pypi.org/project/UltraDict2)
-[![Tests](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/mvanderlee/UltraDict2/actions/workflows/test.yml)
-[![Python 3.11-3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/github/license/mvanderlee/UltraDict2.svg)](https://github.com/mvanderlee/UltraDict2/blob/main/LICENSE)
 
 ## Atomic operations via atomics2
 
