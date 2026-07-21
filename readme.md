@@ -204,17 +204,17 @@ Median across Python 3.11 - 3.14 on Debian 12 bare metal, 10,000 keys:
 
 | | read | vs dict | write | vs dict |
 | --- | ---: | ---: | ---: | ---: |
-| `dict` | 11 ns | 1x | 13 ns | 1x |
+| `dict` | 10 ns | 1x | 13 ns | 1x |
 | `ultra.data` (direct) | 12 ns | 1x | — | — |
-| **`UltraDict`** | **223 ns** | **21x** | **1.87 µs** | **145x** |
-| `Manager` dict | 9.16 µs | 872x | 9.21 µs | 716x |
-| Redis, loopback | 24.93 µs | 2,373x | 27.22 µs | 2,117x |
-| Redis, 1GbE LAN hop | 206.8 µs | 19,698x | 218.5 µs | 16,962x |
+| **`UltraDict`** | **111 ns** | **11x** | **1.60 µs** | **122x** |
+| `Manager` dict | 9.09 µs | 886x | 9.18 µs | 700x |
+| Redis, loopback | 25.09 µs | 2,445x | 27.21 µs | 2,075x |
+| Redis, 1GbE LAN hop | 206.8 µs | 20,155x | 218.5 µs | 16,663x |
 
-Reading through UltraDict costs about **21x a plain dict**, and is **41x faster than a
-`Manager` dict** and **112x faster than a local Redis**. Against a Redis on another machine,
-which is the more usual deployment, it is roughly **1000x** faster. Reading `ultra.data`
-directly is within ~10% of a plain dict, at the cost of not seeing updates.
+Reading through UltraDict costs about **11x a plain dict**, and is **82x faster than a
+`Manager` dict** and **227x faster than a local Redis**. Against a Redis on another machine,
+which is the more usual deployment, it is roughly **1900x** faster. Reading `ultra.data`
+directly is within ~20% of a plain dict, at the cost of not seeing updates.
 
 The gap in the middle of the chart is the point: there is nothing between reading local
 memory and crossing a socket. A read that finds nothing new never leaves the process, which
@@ -230,13 +230,14 @@ Across 3.11 - 3.14 everything lands within 1.1 - 1.4x, which is close enough to 
 
 | read | 3.11 | 3.12 | 3.13 | 3.14 |
 | --- | ---: | ---: | ---: | ---: |
-| `dict` | 9 ns | 11 ns | 11 ns | 9 ns |
-| `UltraDict` | 202 ns | 223 ns | 223 ns | 201 ns |
-| `Manager` dict | 7.26 µs | 8.20 µs | 9.16 µs | 9.57 µs |
-| Redis | 24.08 µs | 24.81 µs | 25.02 µs | 24.93 µs |
+| `dict` | 9 ns | 10 ns | 11 ns | 10 ns |
+| `UltraDict` | 111 ns | 102 ns | 111 ns | 100 ns |
+| `Manager` dict | 7.32 µs | 8.03 µs | 9.16 µs | 9.09 µs |
+| Redis | 24.05 µs | 24.51 µs | 25.21 µs | 25.09 µs |
 
-3.11 and 3.14 are marginally the quickest for UltraDict, but not by enough to pick a version
-over.
+No version is worth picking over another, and that was already true before the control
+block counters stopped being read through `int.from_bytes()`: on this machine the spread was
+1.14x then and 1.11x now.
 
 One caveat that cost us a wrong conclusion, recorded here so nobody repeats it: the same
 benchmark inside a **virtual machine** reported UltraDict as 2.1x slower on 3.13 than on
