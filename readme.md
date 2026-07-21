@@ -195,102 +195,69 @@ Back in the first Python REPL:
 
 Lets compare a classical Python dict, UltraDict, multiprocessing.Manager and Redis.
 
-Note that this comparison is not a real life workload. It was executed on Debian Linux 11
-with Redis installed from the Debian package and with the default configuration of Redis.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/performance-dark.png">
+  <img alt="Cost per operation for dict, UltraDict, Manager dict and Redis on a log scale" src="docs/performance-light.png">
+</picture>
 
-```python
-Python 3.11 on linux
->>>
->>> from UltraDict2 import UltraDict
->>> ultra = UltraDict()
->>> for i in range(10_000): ultra[i] = i
-...
->>> len(ultra)
-10000
->>> ultra[500]
-500
->>> # Now let's do some performance testing
->>> import multiprocessing, redis, timeit
->>> orig = dict(ultra)
->>> len(orig)
-10000
->>> orig[500]
-500
->>> managed = multiprocessing.Manager().dict(orig)
->>> len(managed)
-10000
->>> r = redis.Redis()
->>> r.flushall()
->>> r.mset(orig)
-```
+Median across Python 3.11 - 3.14 on Debian 12 bare metal, 10,000 keys:
 
-### Read performance
+| | read | vs dict | write | vs dict |
+| --- | ---: | ---: | ---: | ---: |
+| `dict` | 11 ns | 1x | 13 ns | 1x |
+| `ultra.data` (direct) | 12 ns | 1x | — | — |
+| **`UltraDict`** | **223 ns** | **21x** | **1.87 µs** | **145x** |
+| `Manager` dict | 9.16 µs | 872x | 9.21 µs | 716x |
+| Redis, loopback | 24.93 µs | 2,373x | 27.22 µs | 2,117x |
+| Redis, 1GbE LAN hop | 206.8 µs | 19,698x | 218.5 µs | 16,962x |
 
->>>
-```python
->>> timeit.timeit('orig[1]', globals=globals()) # original
-0.03832335816696286
->>> timeit.timeit('ultra[1]', globals=globals()) # UltraDict
-0.5248982920311391
->>> timeit.timeit('managed[1]', globals=globals()) # Manager
-40.85506196087226
->>> timeit.timeit('r.get(1)', globals=globals()) # Redis
-49.3497632863
->>> timeit.timeit('ultra.data[1]', globals=globals()) # UltraDict data cache
-0.04309639008715749
-```
+Reading through UltraDict costs about **21x a plain dict**, and is **41x faster than a
+`Manager` dict** and **112x faster than a local Redis**. Against a Redis on another machine,
+which is the more usual deployment, it is roughly **1000x** faster. Reading `ultra.data`
+directly is within ~10% of a plain dict, at the cost of not seeing updates.
 
-We are factor 15 slower than a real, local dict, but way faster than using a Manager. If you need full read performance, you can access the underlying cache `ultra.data` directly and get almost original dict performance, of course at the cost of not having real-time updates anymore.
+The gap in the middle of the chart is the point: there is nothing between reading local
+memory and crossing a socket. A read that finds nothing new never leaves the process, which
+is what buys the two orders of magnitude.
 
-### Write performance
+Writes cost more than reads because the change is serialized and published, and because a
+write that does not fit the buffer forces a full dump of the whole dict. See
+[Buffer sizes and read performance](#memory-management) for how to size it.
 
-```python
->>> min(timeit.repeat('orig[1] = 1', globals=globals())) # original
-0.028232071083039045
->>> min(timeit.repeat('ultra[1] = 1', globals=globals())) # UltraDict
-2.911152713932097
->>> min(timeit.repeat('managed[1] = 1', globals=globals())) # Manager
-31.641707635018975
->>> min(timeit.repeat('r.set(1, 1)', globals=globals())) # Redis
-124.3432381930761
-```
+### Python version
 
-We are factor 100 slower than a real, local Python dict, but still factor 10 faster than using a Manager and much fast than Redis.
+Across 3.11 - 3.14 everything lands within 1.1 - 1.4x, which is close enough to call flat:
 
-### Testing performance
+| read | 3.11 | 3.12 | 3.13 | 3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| `dict` | 9 ns | 11 ns | 11 ns | 9 ns |
+| `UltraDict` | 202 ns | 223 ns | 223 ns | 201 ns |
+| `Manager` dict | 7.26 µs | 8.20 µs | 9.16 µs | 9.57 µs |
+| Redis | 24.08 µs | 24.81 µs | 25.02 µs | 24.93 µs |
 
-There is an automated performance test in `tests/performance/performance.py`. If you run it, you get something like this:
+3.11 and 3.14 are marginally the quickest for UltraDict, but not by enough to pick a version
+over.
 
-```bash
-python ./tests/performance/performance.py
+One caveat that cost us a wrong conclusion, recorded here so nobody repeats it: the same
+benchmark inside a **virtual machine** reported UltraDict as 2.1x slower on 3.13 than on
+3.11, reproducibly. On bare metal that gap is 1.1x. Virtualized IPC and memory access
+inflate this workload unevenly across versions, so benchmark UltraDict on the kind of
+machine you will actually deploy on.
 
-Testing Performance with 1000000 operations each
+### Method
 
-Redis (writes) = 24,351 ops per second
-Redis (reads) = 30,466 ops per second
-Python MPM dict (writes) = 19,371 ops per second
-Python MPM dict (reads) = 22,290 ops per second
-Python dict (writes) = 16,413,569 ops per second
-Python dict (reads) = 16,479,191 ops per second
-UltraDict (writes) = 479,860 ops per second
-UltraDict (reads) = 2,337,944 ops per second
-UltraDict (shared_lock=True) (writes) = 41,176 ops per second
-UltraDict (shared_lock=True) (reads) = 1,518,652 ops per second
+Debian 12 bare metal, 12 cores, each Python version in its official Docker image, Redis 7 on
+the same host over loopback, 10,000 keys, best of three timing repeats. Every candidate gets
+its own iteration count and results are reported per operation, so a 11 ns operation and a
+25 µs one are directly comparable. The LAN row was measured from a second machine on a 1GbE network, where the four
+Python versions agree to within 1.02x because the wire dominates.
 
-Ranking:
-  writes:
-    Python dict = 16,413,569 (factor 1.0)
-    UltraDict = 479,860 (factor 34.2)
-    UltraDict (shared_lock=True) = 41,176 (factor 398.62)
-    Redis = 24,351 (factor 674.04)
-    Python MPM dict = 19,371 (factor 847.33)
-  reads:
-    Python dict = 16,479,191 (factor 1.0)
-    UltraDict = 2,337,944 (factor 7.05)
-    UltraDict (shared_lock=True) = 1,518,652 (factor 10.85)
-    Redis = 30,466 (factor 540.9)
-    Python MPM dict = 22,290 (factor 739.31)
-```
+This is not a real life workload and it is single process: it measures the cost of the
+operations, not what happens when several processes contend.
+
+Reproduce it with `tests/performance/compare.py`. There is also a throughput test in
+`tests/performance/performance.py`, and `tests/performance/buffer_size_sweep.py` for
+choosing `buffer_size`.
 
 I am interested in extending the performance testing to other solutions (like sqlite, memcached, etc.) and to more complex use cases with multiple processes working in parallel.
 
