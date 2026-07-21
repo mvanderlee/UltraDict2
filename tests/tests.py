@@ -191,6 +191,19 @@ class UltraDictTests(unittest.TestCase):
         # The failure itself is still counted
         self.assertEqual(after.full_dump_memory_full_total, 1)
 
+    def test_inplace_or_publishes(self):
+        """`d |= other` has to reach our peers like any other write."""
+        ultra = UltraDict()
+        ultra['a'] = 1
+
+        ultra |= {'b': 2}
+        self.assertEqual(UltraDict(name=ultra.name).data, {'a': 1, 'b': 2})
+
+        source = UltraDict()
+        source['c'] = 3
+        ultra |= source
+        self.assertEqual(UltraDict(name=ultra.name).data, {'a': 1, 'b': 2, 'c': 3})
+
     def test_dump_counter_never_leads_remote(self):
         """A local counter ahead of the remote one would stop this instance ever reloading."""
         ultra = UltraDict()

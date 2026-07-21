@@ -1153,6 +1153,12 @@ class UltraDict(collections.UserDict, dict):
         for k, v in kwargs.items():
             self[k] = v
 
+    def __ior__(self, other):
+        # UserDict merges straight into self.data, which publishes nothing, so peers
+        # never see it and the next full dump load throws it away
+        self.update(other.data if isinstance(other, UltraDict) else other)
+        return self
+
     def __delitem__(self, key):
         # log.debug("__delitem__ {}", key)
         with self.lock:
