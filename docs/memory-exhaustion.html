@@ -499,16 +499,27 @@ fit, then unlinks the previous one:</p>
 if old and old != full_dump_memory.name and not self.full_dump_size:
     self.unlink_by_name(old)                                       # :740</code></pre>
 
-<p>Steady state is therefore two live dump segments at most. But the allocate-then-unlink order
-means a process that dies between those two lines leaks the old segment permanently. Nothing
-reclaims it: <code>/dev/shm</code> entries survive the process that made them. Repeat that under
-a crash loop and tmpfs fills.</p>
+<p>Steady state is therefore two live dump segments at most. But a process that dies in between
+leaks a segment: the new one if it dies before publishing it, the old one if it dies after.
+<code>/dev/shm</code> entries survive the process that made them, so the dump records the segment
+at risk in a reap slot in the control block, and the next dump (or <code>close(unlink=True)</code>)
+unlinks whatever that slot names, unless it is the published segment.</p>
 
-<p>When it does, <code>SharedMemory(create=True, ...)</code> raises a plain <code>OSError</code>.
-That used to escape unwrapped, making "the machine is out of shared memory" indistinguishable
-from any other OS error — arriving from an ordinary-looking <code>d[k] = v</code>. It is now
-caught and re-raised as <code>Exceptions.CannotCreateSharedMemory</code>, with a message naming
-the actual remedies and the original error kept as <code>__cause__</code>.</p>
+<p>A new segment is sparse: <code>ftruncate</code> gives it a size but no pages. On a full tmpfs
+the first write to an unbacked page does not fail, it kills the process with <code>SIGBUS</code>,
+which Python cannot catch. Combined with the leak above that is a crash loop: every dump that dies
+leaks a segment the size of the dict, so the restarted worker has even less room. So every segment
+is backed with <code>posix_fallocate</code> as it is created, and a full tmpfs reports
+<code>ENOSPC</code> at creation instead. Windows commits the paging file up front and needs no
+such step; macOS has no <code>posix_fallocate</code>.</p>
+
+<p>Either way the creation fails with an <code>OSError</code>. That used to escape unwrapped, making
+"the machine is out of shared memory" indistinguishable from any other OS error — arriving from an
+ordinary-looking <code>d[k] = v</code>. It is now caught and re-raised as
+<code>Exceptions.CannotCreateSharedMemory</code>, with a message giving the size asked for, how much
+of <code>/dev/shm</code> is free, and how to raise the shm size (<code>--shm-size</code>,
+<code>shm_size</code> in compose, a memory <code>emptyDir</code> on Kubernetes). The original error
+is kept as <code>__cause__</code>.</p>
 
 <p>Note the filter is the exception <em>type</em>, not the errno. Errno is not dependable here:
 an exhausted Windows paging file reports <code>EINVAL</code>, not <code>ENOSPC</code>, so an
@@ -527,23 +538,23 @@ still cannot be created, and reporting that as an arithmetic error from deep ins
     <div class="zoomhint"><span>scroll to zoom, drag to pan</span><button class="fsbtn" data-fs="2">Fullscreen</button></div>
     <pre class="mermaid">
 flowchart TD
-    A["dump needs memory"] --> B["allocate new segment sized length + 6"]
-    B --> C["write dump, publish name"]
-    C --> D["unlink previous segment"]
-    B -.->|"process dies here"| E["previous segment leaked"]
-    E --> F["tmpfs usage grows"]
-    F --> G["shm_open returns ENOSPC"]
-    G --> H["CannotCreateSharedMemory from __setitem__"]
+    A["dump needs memory"] --> B["create segment, posix_fallocate it"]
+    B -->|"tmpfs full"| H["CannotCreateSharedMemory from __setitem__"]
+    B --> R["record it in the reap slot"]
+    R --> C["write dump, publish name"]
+    C --> D["unlink previous segment, clear the slot"]
+    R -.->|"process dies here"| E["next dump unlinks what the slot names"]
+    C -.->|"process dies here"| E
     </pre>
   </div>
-  <figcaption>The leak window. Default tmpfs is half of RAM, so this takes a while to bite and then bites everything on the host.</figcaption>
+  <figcaption>Exhaustion fails the write instead of the process, and a dump that dies leaves nothing the next one cannot reap.</figcaption>
 </figure>
 
 <div class="facts">
   <dl>
     <dt>Symptom</dt><dd><code>CannotCreateSharedMemory</code> from a dict write, wrapping the host's <code>OSError</code>. Other processes on the host fail too, not just yours.</dd>
     <dt>Metric</dt><dd><code>shm_free_bytes</code> trending down and not recovering. Alert well before zero.</dd>
-    <dt>Fix</dt><dd>Find the orphans: <code>ls -la /dev/shm</code>. Anything matching your dict names with no owning process is leaked and can be removed with <code>UltraDict.unlink_by_name(name, ignore_errors=True)</code>.</dd>
+    <dt>Fix</dt><dd>Raise the shm size, or set <code>full_dump_size</code> so dumps reuse one segment. Segments leaked by versions without the reap slot, or by other software, stay put: find them with <code>ls -la /dev/shm</code>, and remove any with no owning process with <code>UltraDict.unlink_by_name(name, ignore_errors=True)</code>.</dd>
   </dl>
 </div>
 
