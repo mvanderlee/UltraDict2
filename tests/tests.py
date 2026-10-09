@@ -1,3 +1,4 @@
+import errno
 import os
 import subprocess
 import sys
@@ -284,6 +285,23 @@ class UltraDictTests(unittest.TestCase):
 
                 # The original stays reachable, so errno and winerror can still be read
                 self.assertIsInstance(ctx.exception.__cause__, (OSError, OverflowError))
+                self.assertIn('--shm-size', str(ctx.exception))
+
+    @unittest.skipUnless(hasattr(os, 'posix_fallocate'), 'needs posix_fallocate')
+    def test_full_shm_raises_instead_of_sigbus(self):
+        """A full /dev/shm fails the create with our error and leaves no segment behind."""
+        name = 'ultra_test_enospc'
+        UltraDict.unlink_by_name(name, ignore_errors=True)
+
+        enospc = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        with mock.patch('UltraDict2.UltraDict2.os.posix_fallocate', side_effect=enospc):
+            with self.assertRaises(UltraDict.Exceptions.CannotCreateSharedMemory) as ctx:
+                UltraDict.get_memory(create=True, name=name, size=1000)
+
+        self.assertIs(ctx.exception.__cause__, enospc)
+        self.assertIn('--shm-size', str(ctx.exception))
+        with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
+            UltraDict.get_memory(create=False, name=name)
 
     def test_full_dumps_too_fast_is_bounded(self):
         """A reader that can never catch up gives up typed, instead of recursing until the stack ends."""

@@ -778,6 +778,22 @@ class UltraDict(collections.UserDict, dict):
             time.sleep(READY_INTERVAL)
 
     @staticmethod
+    def preallocate(memory):
+        """Back every page of a new segment now.
+
+        A created segment is sparse, so on a full /dev/shm the first write to an unbacked
+        page kills the process with SIGBUS. Allocating up front turns that into ENOSPC here.
+        """
+        if not hasattr(os, 'posix_fallocate'):
+            return
+        try:
+            os.posix_fallocate(memory._fd, 0, memory.size)
+        except OSError:
+            memory.close()
+            memory.unlink()
+            raise
+
+    @staticmethod
     def get_memory(*, create=True, name=None, size=0):
         """
         Attach an existing SharedMemory object with `name`.
@@ -809,6 +825,7 @@ class UltraDict(collections.UserDict, dict):
             if create or create is None:
                 try:
                     memory = multiprocessing.shared_memory.SharedMemory(create=True, size=size, name=name, **shm_track_kwargs)
+                    UltraDict.preallocate(memory)
                 except FileExistsError:
                     if create:
                         raise Exceptions.AlreadyExists(f"Cannot create memory '{name}' because it already exists") from None
@@ -820,12 +837,17 @@ class UltraDict(collections.UserDict, dict):
                     # file reports EINVAL, not ENOSPC, so the type is the filter. OverflowError
                     # joins it because a size beyond ssize_t never reaches the OS at all: on a
                     # 32-bit build mmap rejects it, which is a host limit like any other.
+                    shm_usage = ''
+                    if os.path.isdir('/dev/shm'):
+                        _, shm_used, shm_free = shutil.disk_usage('/dev/shm')
+                        shm_usage = f" /dev/shm has {shm_free} bytes free, {shm_used} in use."
                     raise Exceptions.CannotCreateSharedMemory(
-                        f"Cannot create shared memory of {size} bytes: {e}. The host is out of shared "
-                        "memory or file descriptors. On Linux, grow /dev/shm (eg. `docker run "
-                        "--shm-size=1g`) or look for segments left behind by crashed processes; on "
-                        "Windows, grow the paging file. Setting full_dump_size stops a new segment "
-                        "being allocated for every dump."
+                        f"Cannot create shared memory of {size} bytes: {e}.{shm_usage} The host is out of "
+                        "shared memory or file descriptors. Increase the shm size: `docker run "
+                        "--shm-size=1g`, `shm_size: 1g` in docker compose, or on Kubernetes an emptyDir "
+                        "with `medium: Memory` mounted at /dev/shm. Segments left behind by crashed "
+                        "processes (/dev/shm/psm_*) also take up space. On Windows, grow the paging file. "
+                        "Setting full_dump_size stops a new segment being allocated for every dump."
                     ) from e
                 # Remember that we have created this memory
                 memory.created_by_ultra = True
