@@ -303,6 +303,37 @@ class UltraDictTests(unittest.TestCase):
         with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
             UltraDict.get_memory(create=False, name=name)
 
+    @unittest.skipIf(sys.platform == 'win32', 'Windows frees segments when their last handle closes')
+    def test_dump_reaps_segment_of_dead_dumper(self):
+        """A segment a dead dumper left in the reap slot is unlinked by the next dump, and by close."""
+        for reaper in ('dump', 'close'):
+            with self.subTest(reaper=reaper):
+                ultra = UltraDict()
+                ultra.dump()
+
+                # What a dumper killed between creating its segment and publishing it leaves behind
+                leaked = UltraDict.get_memory(create=True, size=100)
+                ultra.full_dump_memory_reap_remote[:] = leaked.name.encode('utf-8').ljust(255)
+                leaked.close()
+
+                if reaper == 'dump':
+                    ultra.dump()
+                    self.assertEqual(bytes(ultra.full_dump_memory_reap_remote), bytes(255))
+                ultra.unlink()
+
+                with self.assertRaises(UltraDict.Exceptions.CannotAttachSharedMemory):
+                    UltraDict.get_memory(create=False, name=leaked.name)
+
+    def test_dump_never_reaps_published_segment(self):
+        """The static full dump segment is published, so naming it in the reap slot must not unlink it."""
+        ultra = UltraDict(full_dump_size=10_000)
+        ultra['a'] = 1
+        ultra.full_dump_memory_reap_remote[:] = ultra.full_dump_memory.name.encode('utf-8').ljust(255)
+        ultra.dump()
+
+        other = UltraDict(name=ultra.name)
+        self.assertEqual(other['a'], 1)
+
     def test_full_dumps_too_fast_is_bounded(self):
         """A reader that can never catch up gives up typed, instead of recursing until the stack ends."""
         ultra = UltraDict()

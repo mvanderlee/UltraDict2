@@ -462,6 +462,7 @@ class UltraDict(collections.UserDict, dict):
         'recurse_remote',
         'recurse_register',
         'full_dump_memory_name_remote',
+        'full_dump_memory_reap_remote',
         'lock_time_remote',
         'data',
         'closed',
@@ -708,6 +709,9 @@ class UltraDict(collections.UserDict, dict):
         self.full_dump_memory_name_remote = self.control.buf[20:275]
         self.lock_time_remote = self.control.buf[275:283]
         self.ready_remote = self.control.buf[283:284]
+        # Full dump segment that is not or no longer published, for the next dump to unlink
+        # if its writer died before it could
+        self.full_dump_memory_reap_remote = self.control.buf[284:539]
 
         # int.from_bytes() on a memoryview copies it into a temporary bytes object on
         # every call, and the read path pays that twice before it can answer whether
@@ -864,6 +868,11 @@ class UltraDict(collections.UserDict, dict):
         with self.lock:
             old = bytes(self.full_dump_memory_name_remote).decode('utf-8').strip().strip('\x00')
 
+            reap = bytes(self.full_dump_memory_reap_remote).decode('utf-8').strip().strip('\x00')
+            if reap and reap != old:
+                self.shm_unlink(reap)
+            self.full_dump_memory_reap_remote[:] = bytes(255)
+
             self.apply_update()
 
             marshalled = self.serializer.dumps(self.data)
@@ -877,6 +886,8 @@ class UltraDict(collections.UserDict, dict):
             else:
                 # Dynamic full dump memory
                 full_dump_memory = self.get_memory(create=True, size=length + 6)
+                # Before the first write, so dying while writing it does not leak it
+                self.full_dump_memory_reap_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
 
             # log.debug("Full dump memory: ", full_dump_memory)
 
@@ -908,6 +919,7 @@ class UltraDict(collections.UserDict, dict):
             # we update the remote name so other users can find it
             if not (self.full_dump_size and self.full_dump_memory):
                 self.full_dump_memory_name_remote[:] = full_dump_memory.name.encode('utf-8').ljust(255)
+                self.full_dump_memory_reap_remote[:] = old.encode('utf-8').ljust(255)
 
             self.full_dump_length = length
             current = self.full_dump_counter_int_remote[0]
@@ -934,6 +946,7 @@ class UltraDict(collections.UserDict, dict):
             # leaked segment and must not fail the write.
             if old and old != full_dump_memory.name and not self.full_dump_size:
                 self.unlink_by_name(old, ignore_errors=True)
+            self.full_dump_memory_reap_remote[:] = bytes(255)
 
             return full_dump_memory
 
@@ -1388,9 +1401,10 @@ class UltraDict(collections.UserDict, dict):
         if hasattr(self, 'finalizer'):
             self.finalizer.detach()
 
-        full_dump_name = None
+        full_dump_name = reap_name = None
         if hasattr(self, 'full_dump_memory_name_remote'):
             full_dump_name = bytes(self.full_dump_memory_name_remote).decode('utf-8').strip().strip('\x00')
+            reap_name = bytes(self.full_dump_memory_reap_remote).decode('utf-8').strip().strip('\x00')
 
         data = self.cleanup()
 
@@ -1403,6 +1417,8 @@ class UltraDict(collections.UserDict, dict):
             self.buffer.unlink()
             if full_dump_name:
                 self.unlink_by_name(full_dump_name, ignore_errors=True)
+            if reap_name and reap_name != full_dump_name:
+                self.shm_unlink(reap_name)
 
             if getattr(self, 'recurse', False):
                 self.unlink_recursed()
@@ -1426,6 +1442,16 @@ class UltraDict(collections.UserDict, dict):
             self.unlink_by_name(name=f"{name}_memory", ignore_errors=ignore_errors)
 
         self.recurse_register.close(unlink=True)
+
+    @staticmethod
+    def shm_unlink(name):
+        """Unlink `name` without attaching, so a segment its creator never sized cannot stall us."""
+        if _posixshmem is None:
+            return
+        try:
+            _posixshmem.shm_unlink('/' + name)
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def unlink_by_name(name, ignore_errors=False):
